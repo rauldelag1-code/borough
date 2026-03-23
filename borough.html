@@ -135,6 +135,77 @@ async function scrapeUrl(url){
   return null;
 }
 
+// ── Building URL Scraper ─────────────────────────────────────────────────────
+async function scrapeBuildingUrl(url){
+  const BLOCK_KEYWORDS=["access denied","captcha","blocked","forbidden","please verify","are you a robot","security check"];
+  for(const proxy of CORS_PROXIES){
+    try{
+      const res=await fetch(proxy(url),{signal:AbortSignal.timeout(8000)});
+      if(!res.ok)continue;
+      const html=await res.text();
+      if(html.length<200)continue;
+      const lower=html.substring(0,2000).toLowerCase();
+      if(BLOCK_KEYWORDS.some(kw=>lower.includes(kw))&&!lower.includes("og:title"))continue;
+      const doc=new DOMParser().parseFromString(html,"text/html");
+      const meta=(n)=>{const el=doc.querySelector('meta[property="'+n+'"],meta[name="'+n+'"]');return el?el.getAttribute("content")||"":""};
+      const title=meta("og:title")||doc.title||"";
+      const desc=meta("og:description")||meta("description")||"";
+      const image=meta("og:image")||"";
+      if(!title||/access denied|forbidden|blocked|error/i.test(title))continue;
+      const fullText=(title+" "+desc+" "+doc.body.innerText.substring(0,5000)).replace(/\s+/g," ");
+      // Extract building name from title (strip suffixes like "| Apartments in NYC")
+      const name=title.replace(/\s*[-|].*(apartments?|rent|nyc|new york|living|home|residence).*/i,"").trim();
+      // Extract address — look for street pattern in header, meta, or body
+      let address="";
+      const addrEl=doc.querySelector('[class*="address"],[class*="location"],[itemtype*="PostalAddress"]');
+      if(addrEl)address=addrEl.textContent.replace(/\s+/g," ").trim().substring(0,100);
+      if(!address){const am=fullText.match(/(\d+\s+[\w\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Dr|Pl|Way|Ct|Ln|Broadway)[^,|]*)/i);if(am)address=am[1].trim();}
+      // Extract neighborhood
+      let neighborhood="";
+      const nm=fullText.match(/(?:in|at|of)\s+(?:the\s+)?([\w\s]+?)(?:\s*[,.|]|\s+(?:NYC|New York|apartments?|neighborhood))/i);
+      if(nm)neighborhood=nm[1].replace(/(?:the|our|this)\s*/i,"").trim();
+      // Extract phone number
+      let phone="";
+      const pm=fullText.match(/(\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4})/);if(pm)phone=pm[1];
+      // Detect amenities from page text
+      const amenities={};
+      const lowerFull=fullText.toLowerCase();
+      if(/\b(?:doorman|concierge|door\s*man|24.?hour.*(?:door|lobby|staff))\b/i.test(lowerFull))amenities.Doorman=true;
+      if(/\b(?:gym|fitness|work\s*out|exercise)\b/i.test(lowerFull))amenities.Gym=true;
+      if(/\b(?:laundry|washer|dryer)\b/i.test(lowerFull))amenities.Laundry=true;
+      if(/\b(?:roof(?:top)?|terrace|deck|sky\s*lounge)\b/i.test(lowerFull))amenities.Rooftop=true;
+      if(/\b(?:pet|dog|cat)\b/i.test(lowerFull))amenities["Pet Policy"]=true;
+      if(/\b(?:parking|garage|valet)\b/i.test(lowerFull))amenities.Parking=true;
+      // Detect other amenities
+      const otherAmenities=[];
+      if(/\b(?:pool|swimming)\b/i.test(lowerFull))otherAmenities.push("Pool");
+      if(/\b(?:lounge|club\s*room|resident.*lounge)\b/i.test(lowerFull))otherAmenities.push("Lounge");
+      if(/\b(?:bike|cycling|bicycle)\b/i.test(lowerFull))otherAmenities.push("Bike Room");
+      if(/\b(?:storage|closet)\b/i.test(lowerFull))otherAmenities.push("Storage");
+      if(/\b(?:elevator)\b/i.test(lowerFull))otherAmenities.push("Elevator");
+      if(otherAmenities.length)amenities.other=otherAmenities.join(", ");
+      // Extract price range
+      let minPrice="",maxPrice="";
+      const prices=fullText.match(/\$[\d,]+/g);
+      if(prices&&prices.length>0){
+        const nums=prices.map(p=>parseInt(p.replace(/[$,]/g,""),10)).filter(n=>n>500&&n<50000).sort((a,b)=>a-b);
+        if(nums.length>=2){minPrice=String(nums[0]);maxPrice=String(nums[nums.length-1]);}
+        else if(nums.length===1)minPrice=String(nums[0]);
+      }
+      // Bed types for description
+      let bedTypes="";
+      if(/studio/i.test(fullText))bedTypes+="Studio, ";
+      const bedMatch=fullText.match(/(\w+(?:,\s*\w+)*(?:,?\s*and\s+\w+)?)[- ]bedroom/i);
+      if(bedMatch)bedTypes+=bedMatch[0];
+      else{if(/\bone\b.*bed/i.test(fullText)||/1[- ]?bed/i.test(fullText))bedTypes+="1BR, ";
+        if(/\btwo\b.*bed/i.test(fullText)||/2[- ]?bed/i.test(fullText))bedTypes+="2BR, ";
+        if(/\bthree\b.*bed/i.test(fullText)||/3[- ]?bed/i.test(fullText))bedTypes+="3BR, ";}
+      return{name,address,neighborhood,photoUrl:image,phone,amenities,description:desc.substring(0,300),leasingDetails:{minPrice,maxPrice},bedTypes:bedTypes.replace(/,\s*$/,""),url};
+    }catch{}
+  }
+  return null;
+}
+
 // ── Firebase ─────────────────────────────────────────────────────────────────
 let fbApp=null,fbDb=null,fbRef=null;
 let lastLocalWrite=0; // timestamp of last local write to prevent overwrite race
@@ -777,15 +848,40 @@ function BuildingCard({building,listings,onClick}){
 function AddBuildingModal({onClose,onAdd}){
   const[form,setForm]=useState({
     name:"",address:"",neighborhood:"",managementCompany:"",yearBuilt:"",numUnits:"",
-    photoUrl:"",amenities:{},leasingDetails:{appReqs:"",brokerFee:false,brokerFeeAmount:"",minPrice:"",maxPrice:"",leaseTerms:"",notes:""}
+    photoUrl:"",url:"",amenities:{},leasingDetails:{appReqs:"",brokerFee:false,brokerFeeAmount:"",minPrice:"",maxPrice:"",leaseTerms:"",notes:""}
   });
+  const[scraping,setScraping]=useState(false);
+  const[scraped,setScraped]=useState(false);
 
   const set=(k,v)=>setForm(p=>({...p,[k]:v}));
   const setAmenity=(k,v)=>setForm(p=>({...p,amenities:{...p.amenities,[k]:v}}));
   const setLeasingDetail=(k,v)=>setForm(p=>({...p,leasingDetails:{...p.leasingDetails,[k]:v}}));
 
+  const handleUrlPaste=async(e)=>{
+    const url=e.target.value;
+    set("url",url);
+    if(!url.startsWith("http"))return;
+    setScraping(true);
+    const data=await scrapeBuildingUrl(url);
+    setScraping(false);
+    if(data){
+      setScraped(true);
+      setForm(p=>({
+        ...p,
+        url,
+        name:data.name||p.name,
+        address:data.address||p.address,
+        neighborhood:data.neighborhood||p.neighborhood,
+        photoUrl:data.photoUrl||p.photoUrl,
+        amenities:{...p.amenities,...data.amenities},
+        leasingDetails:{...p.leasingDetails,minPrice:data.leasingDetails.minPrice||p.leasingDetails.minPrice,maxPrice:data.leasingDetails.maxPrice||p.leasingDetails.maxPrice},
+      }));
+      setTimeout(()=>setScraped(false),2500);
+    }
+  };
+
   const submit=()=>{
-    if(!form.name||!form.address)return;
+    if(!form.name&&!form.url)return;
     onAdd({
       ...form,
       id:uid(),
@@ -798,7 +894,14 @@ function AddBuildingModal({onClose,onAdd}){
 
   return(
     <Modal title="Add Building" onClose={onClose} wide>
-      <div style={{fontSize:13,fontWeight:600,color:"#fff",marginBottom:12,marginTop:-8}}>Location & Basics</div>
+      <Field label="Building Website URL">
+        <div style={{position:"relative"}}>
+          <input value={form.url} onChange={handleUrlPaste} placeholder="Paste a building website to auto-fill details..." />
+          {scraping&&<span style={{position:"absolute",right:12,top:10,fontSize:11,color:"#38bdf8",animation:"pulse 1s infinite"}}>Fetching...</span>}
+          {scraped&&<span style={{position:"absolute",right:12,top:10,fontSize:11,color:"#34d399"}}>Auto-filled</span>}
+        </div>
+      </Field>
+      <div style={{fontSize:13,fontWeight:600,color:"#fff",marginBottom:12,marginTop:4}}>Location & Basics</div>
       <Field label="Name"><input value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. The Windermere" /></Field>
       <Field label="Address"><input value={form.address} onChange={e=>set("address",e.target.value)} placeholder="e.g. 400 West 57th Street" /></Field>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -894,6 +997,9 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
           </div>
         ):(
           <div>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+              {building.url&&<a href={building.url} target="_blank" style={{fontSize:11,color:"#38bdf8",textDecoration:"none"}}>Visit website ↗</a>}
+            </div>
             <h2 style={{fontSize:20,fontWeight:700,marginBottom:4}}>{building.name||"Untitled"}</h2>
             {building.address&&<div style={{fontSize:13,color:"#888"}}>{building.address}</div>}
             <div style={{display:"flex",gap:10,marginTop:8,flexWrap:"wrap",alignItems:"center"}}>
