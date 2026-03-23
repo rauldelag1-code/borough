@@ -381,25 +381,29 @@ function AddListingModal({onClose,onAdd,buildings}){
   const[form,setForm]=useState({name:"",address:"",neighborhood:"",amenities:"",url:"",price:"",bed:"",bath:"",notes:"",photoUrl:"",buildingId:""});
   const[scraping,setScraping]=useState(false);
   const[scraped,setScraped]=useState(false);
+  const scrapeTimer=useRef(null);
 
   const set=(k,v)=>setForm(p=>({...p,[k]:v}));
 
-  const handleUrlPaste=async(e)=>{
+  const handleUrlPaste=(e)=>{
     const url=e.target.value;
     set("url",url);
-    if(!url.startsWith("http"))return;
+    if(!url.startsWith("http")||!url.includes("."))return;
     // Instant URL parsing
     const hints=parseUrlHints(url);
     setForm(p=>({...p,url,name:hints.name||p.name,address:hints.address||p.address,neighborhood:hints.neighborhood||p.neighborhood,bed:hints.bed||p.bed,price:hints.price||p.price}));
-    // Async scrape
-    setScraping(true);
-    const data=await scrapeUrl(url);
-    setScraping(false);
-    if(data){
-      setScraped(true);
-      setForm(p=>({...p,name:data.name||p.name,address:data.address||p.address,neighborhood:data.neighborhood||p.neighborhood,price:data.price||p.price,bed:data.bed||p.bed,photoUrl:data.photoUrl||p.photoUrl}));
-      setTimeout(()=>setScraped(false),2000);
-    }
+    // Debounced async scrape — wait 600ms after last keystroke
+    if(scrapeTimer.current)clearTimeout(scrapeTimer.current);
+    scrapeTimer.current=setTimeout(async()=>{
+      setScraping(true);
+      const data=await scrapeUrl(url);
+      setScraping(false);
+      if(data){
+        setScraped(true);
+        setForm(p=>({...p,name:data.name||p.name,address:data.address||p.address,neighborhood:data.neighborhood||p.neighborhood,price:data.price||p.price,bed:data.bed||p.bed,photoUrl:data.photoUrl||p.photoUrl}));
+        setTimeout(()=>setScraped(false),2000);
+      }
+    },600);
   };
 
   const submit=()=>{
@@ -852,32 +856,37 @@ function AddBuildingModal({onClose,onAdd}){
   });
   const[scraping,setScraping]=useState(false);
   const[scraped,setScraped]=useState(false);
+  const scrapeTimer=useRef(null);
 
   const set=(k,v)=>setForm(p=>({...p,[k]:v}));
   const setAmenity=(k,v)=>setForm(p=>({...p,amenities:{...p.amenities,[k]:v}}));
   const setLeasingDetail=(k,v)=>setForm(p=>({...p,leasingDetails:{...p.leasingDetails,[k]:v}}));
 
-  const handleUrlPaste=async(e)=>{
+  const handleUrlPaste=(e)=>{
     const url=e.target.value;
     set("url",url);
-    if(!url.startsWith("http"))return;
-    setScraping(true);
-    const data=await scrapeBuildingUrl(url);
-    setScraping(false);
-    if(data){
-      setScraped(true);
-      setForm(p=>({
-        ...p,
-        url,
-        name:data.name||p.name,
-        address:data.address||p.address,
-        neighborhood:data.neighborhood||p.neighborhood,
-        photoUrl:data.photoUrl||p.photoUrl,
-        amenities:{...p.amenities,...data.amenities},
-        leasingDetails:{...p.leasingDetails,minPrice:data.leasingDetails.minPrice||p.leasingDetails.minPrice,maxPrice:data.leasingDetails.maxPrice||p.leasingDetails.maxPrice},
-      }));
-      setTimeout(()=>setScraped(false),2500);
-    }
+    if(!url.startsWith("http")||!url.includes("."))return;
+    // Debounced async scrape — wait 600ms after last keystroke
+    if(scrapeTimer.current)clearTimeout(scrapeTimer.current);
+    scrapeTimer.current=setTimeout(async()=>{
+      setScraping(true);
+      const data=await scrapeBuildingUrl(url);
+      setScraping(false);
+      if(data){
+        setScraped(true);
+        setForm(p=>({
+          ...p,
+          url,
+          name:data.name||p.name,
+          address:data.address||p.address,
+          neighborhood:data.neighborhood||p.neighborhood,
+          photoUrl:data.photoUrl||p.photoUrl,
+          amenities:{...p.amenities,...data.amenities},
+          leasingDetails:{...p.leasingDetails,minPrice:data.leasingDetails.minPrice||p.leasingDetails.minPrice,maxPrice:data.leasingDetails.maxPrice||p.leasingDetails.maxPrice},
+        }));
+        setTimeout(()=>setScraped(false),2500);
+      }
+    },600);
   };
 
   const submit=()=>{
