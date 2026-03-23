@@ -105,17 +105,23 @@ const CORS_PROXIES=[
 ];
 
 async function scrapeUrl(url){
+  const BLOCK_KEYWORDS=["access denied","captcha","blocked","forbidden","please verify","are you a robot","enable javascript","security check"];
   for(const proxy of CORS_PROXIES){
     try{
       const res=await fetch(proxy(url),{signal:AbortSignal.timeout(6000)});
       if(!res.ok)continue;
       const html=await res.text();
       if(html.length<200)continue;
+      // Detect blocked / access-denied pages
+      const lower=html.substring(0,2000).toLowerCase();
+      if(BLOCK_KEYWORDS.some(kw=>lower.includes(kw))&&!lower.includes("og:title"))continue;
       const doc=new DOMParser().parseFromString(html,"text/html");
       const meta=(n)=>{const el=doc.querySelector('meta[property="'+n+'"],meta[name="'+n+'"]');return el?el.getAttribute("content")||"":""};
       const title=meta("og:title")||doc.title||"";
       const desc=meta("og:description")||meta("description")||"";
       const image=meta("og:image")||"";
+      // Skip if title looks like an error page
+      if(!title||/access denied|forbidden|blocked|error/i.test(title))continue;
       let price="";const pm=(desc+" "+title).match(/\$[\d,]+/);if(pm)price=pm[0].replace(/[$,]/g,"");
       let bed="";const bm=(desc+" "+title).match(/(\d)\s*(?:bed|br|bedroom)/i);if(bm)bed=bm[1]==="0"?"Studio":bm[1]+"BR";
       if(!bed&&(desc+" "+title).match(/studio/i))bed="Studio";
@@ -130,6 +136,7 @@ async function scrapeUrl(url){
 
 // ── Firebase ─────────────────────────────────────────────────────────────────
 let fbApp=null,fbDb=null,fbRef=null;
+let lastLocalWrite=0; // timestamp of last local write to prevent overwrite race
 
 function initFirebase(config,boardId){
   try{
@@ -145,9 +152,18 @@ function subscribeFirebase(onData){
   const cb=fbRef.on("value",snap=>{const v=snap.val();if(v)onData(v)});
   return ()=>fbRef.off("value",cb);
 }
+// Strip large base64 screenshot data before sending to Firebase (keeps URLs, strips data:image blobs)
+function stripScreenshotsForFirebase(listings){
+  return listings.map(l=>{
+    if(!l.screenshots||l.screenshots.length===0)return l;
+    return{...l,screenshots:l.screenshots.map(s=>s.data&&s.data.length>1000?{...s,data:"[local]"}:s)};
+  });
+}
 function pushFirebase(listings){
   if(!fbRef)return;
-  fbRef.set({listings,updatedAt:Date.now()}).catch(e=>console.error("Firebase write error:",e));
+  lastLocalWrite=Date.now();
+  const clean=stripScreenshotsForFirebase(listings);
+  fbRef.set({listings:clean,updatedAt:Date.now()}).catch(e=>console.error("Firebase write error:",e));
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -229,7 +245,10 @@ function ListingCard({listing,onClick,onDragStart}){
           <img src={listing.photoUrl} style={{width:"100%",height:"100%",objectFit:"cover"}} onError={e=>{e.target.style.display="none"}} />
         </div>
       )}
-      <div style={{fontSize:14,fontWeight:600,marginBottom:4,lineHeight:1.3}}>{listing.name||"Untitled"}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+        <div style={{fontSize:14,fontWeight:600,lineHeight:1.3,flex:1}}>{listing.name||"Untitled"}</div>
+        {listing.rating>0&&<div style={{fontSize:12,color:"#fbbf24",flexShrink:0,marginLeft:6}}>{"★".repeat(listing.rating)}<span style={{opacity:.3}}>{"★".repeat(5-listing.rating)}</span></div>}
+      </div>
       {listing.address&&<div style={{fontSize:11,color:"#888",marginBottom:4}}>{listing.address}</div>}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
         {listing.price&&<span style={{fontSize:12,background:"#1a2a1a",color:"#34d399",padding:"3px 10px",borderRadius:4,fontWeight:500}}>${Number(listing.price).toLocaleString()}/mo</span>}
@@ -732,8 +751,23 @@ function App(){
     if(!ok)return;
     setFbConnected(true);
     const unsub=subscribeFirebase((remote)=>{
+      // Skip if we just wrote locally (prevent race condition overwriting new data)
+      if(Date.now()-lastLocalWrite<2000)return;
       setDataRaw(prev=>{
-        const next={...prev,listings:remote.listings||[]};
+        // Merge: keep local screenshots that were stripped for Firebase
+        const remoteListings=(remote.listings||[]).map(rl=>{
+          const local=prev.listings.find(l=>l.id===rl.id);
+          if(local&&local.screenshots&&local.screenshots.length>0){
+            const mergedSS=local.screenshots.map(s=>{
+              if(s.data&&s.data!=="[local]")return s;
+              const remoteSS=(rl.screenshots||[]).find(rs=>rs.id===s.id);
+              return remoteSS||s;
+            });
+            return{...rl,screenshots:mergedSS};
+          }
+          return rl;
+        });
+        const next={...prev,listings:remoteListings};
         saveLocal(next);
         return next;
       });
