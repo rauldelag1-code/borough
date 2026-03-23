@@ -21,6 +21,9 @@
     .fade{animation:fadeIn .2s ease}
     @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
     @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+    .star-rating{display:inline-flex;gap:4px;user-select:none}
+    .star{font-size:20px;cursor:pointer;opacity:.3;transition:opacity .15s}
+    .star.filled{opacity:1}
   </style>
 </head>
 <body>
@@ -43,11 +46,11 @@ const DEFAULT_BOARD_ID="borough-main";
 
 // ── Pipeline Stages ──────────────────────────────────────────────────────────
 const STAGES=[
-  {id:"saved",label:"Saved",color:"#666",emoji:"📌"},
-  {id:"touring",label:"Touring",color:"#38bdf8",emoji:"👀"},
-  {id:"applied",label:"Applied",color:"#a78bfa",emoji:"📝"},
-  {id:"approved",label:"Approved",color:"#34d399",emoji:"✓"},
-  {id:"signed",label:"Signed",color:"#fbbf24",emoji:"🎉"},
+  {id:"saved",label:"Saved",color:"#666"},
+  {id:"touring",label:"Touring",color:"#38bdf8"},
+  {id:"applied",label:"Applied",color:"#a78bfa"},
+  {id:"approved",label:"Approved",color:"#34d399"},
+  {id:"signed",label:"Signed",color:"#fbbf24"},
 ];
 const STAGE_MAP=Object.fromEntries(STAGES.map(s=>[s.id,s]));
 
@@ -177,6 +180,32 @@ function Field({label,children}){
   );
 }
 
+// ── Star Rating Component ────────────────────────────────────────────────────
+function StarRating({rating,onRate}){
+  return(
+    <div className="star-rating">
+      {[1,2,3,4,5].map(i=>(
+        <span key={i} className={"star"+(i<=rating?" filled":"")} onClick={()=>onRate(i)} style={{opacity:i<=rating?1:0.3}}>★</span>
+      ))}
+    </div>
+  );
+}
+
+// ── Getting Started Banner ───────────────────────────────────────────────────
+function GettingStartedBanner({onDismiss}){
+  return(
+    <div style={{background:"#0f0f0f",border:"1px solid #222",borderRadius:8,padding:16,marginBottom:16,position:"relative",margin:"16px 20px 0 20px"}}>
+      <button onClick={onDismiss} style={{position:"absolute",top:12,right:12,background:"none",color:"#666",fontSize:18,width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+      <div style={{paddingRight:32}}>
+        <div style={{fontSize:13,fontWeight:600,color:"#fff",marginBottom:8}}>Getting Started</div>
+        <div style={{fontSize:12,color:"#888",lineHeight:1.6}}>
+          Add listings by clicking <strong>+ Add Listing</strong> or paste a StreetEasy/Zillow link. Drag cards between columns to track your progress. Click any card to add notes, photos, and agent contacts.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Listing Card (Kanban) ────────────────────────────────────────────────────
 function ListingCard({listing,onClick,onDragStart}){
   const stage=STAGE_MAP[listing.stage]||STAGE_MAP.saved;
@@ -203,14 +232,14 @@ function ListingCard({listing,onClick,onDragStart}){
       <div style={{fontSize:14,fontWeight:600,marginBottom:4,lineHeight:1.3}}>{listing.name||"Untitled"}</div>
       {listing.address&&<div style={{fontSize:11,color:"#888",marginBottom:4}}>{listing.address}</div>}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
-        {listing.price&&<span style={{fontSize:11,background:"#1a2a1a",color:"#34d399",padding:"2px 8px",borderRadius:4,fontWeight:500}}>${Number(listing.price).toLocaleString()}/mo</span>}
-        {listing.bed&&<span style={{fontSize:11,background:"#1a1a2a",color:"#818cf8",padding:"2px 8px",borderRadius:4}}>{listing.bed}</span>}
-        {listing.neighborhood&&<span style={{fontSize:11,background:"#1a1a1a",color:"#888",padding:"2px 8px",borderRadius:4}}>{listing.neighborhood}</span>}
+        {listing.price&&<span style={{fontSize:12,background:"#1a2a1a",color:"#34d399",padding:"3px 10px",borderRadius:4,fontWeight:500}}>${Number(listing.price).toLocaleString()}/mo</span>}
+        {listing.bed&&<span style={{fontSize:12,background:"#1a1a2a",color:"#818cf8",padding:"3px 10px",borderRadius:4}}>{listing.bed}</span>}
+        {listing.neighborhood&&<span style={{fontSize:12,background:"#1a1a1a",color:"#888",padding:"3px 10px",borderRadius:4}}>{listing.neighborhood}</span>}
       </div>
       {(hasNotes||eventCount>0)&&(
         <div style={{display:"flex",gap:8,marginTop:8,fontSize:10,color:"#555"}}>
-          {hasNotes&&<span>📝 has notes</span>}
-          {eventCount>0&&<span>📋 {eventCount} update{eventCount>1?"s":""}</span>}
+          {hasNotes&&<span>notes</span>}
+          {eventCount>0&&<span>{eventCount} update{eventCount>1?"s":""}</span>}
         </div>
       )}
     </div>
@@ -218,7 +247,7 @@ function ListingCard({listing,onClick,onDragStart}){
 }
 
 // ── Kanban Column ────────────────────────────────────────────────────────────
-function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart}){
+function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart,onHeaderClick}){
   const[over,setOver]=useState(false);
 
   return(
@@ -230,8 +259,8 @@ function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart}){
         minWidth:280,maxWidth:320,flex:"1 0 280px",display:"flex",flexDirection:"column",height:"calc(100vh - 70px)",
       }}
     >
-      <div style={{display:"flex",alignItems:"center",gap:8,padding:"12px 4px",marginBottom:4}}>
-        <span style={{fontSize:14}}>{stage.emoji}</span>
+      <div style={{display:"flex",alignItems:"center",gap:8,padding:"12px 4px",marginBottom:4,cursor:"pointer"}} onClick={onHeaderClick}>
+        <span style={{fontSize:12,width:8,height:8,borderRadius:"50%",background:stage.color}} />
         <span style={{fontSize:13,fontWeight:600,color:stage.color}}>{stage.label}</span>
         <span style={{fontSize:11,color:"#444",fontWeight:500,background:"#1a1a1a",padding:"1px 7px",borderRadius:8}}>{listings.length}</span>
       </div>
@@ -256,7 +285,7 @@ function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart}){
 
 // ── Add Listing Modal ────────────────────────────────────────────────────────
 function AddListingModal({onClose,onAdd}){
-  const[form,setForm]=useState({name:"",address:"",neighborhood:"",url:"",price:"",bed:"",bath:"",notes:"",photoUrl:""});
+  const[form,setForm]=useState({name:"",address:"",neighborhood:"",amenities:"",url:"",price:"",bed:"",bath:"",notes:"",photoUrl:""});
   const[scraping,setScraping]=useState(false);
   const[scraped,setScraped]=useState(false);
 
@@ -308,6 +337,7 @@ function AddListingModal({onClose,onAdd}){
         <Field label="Price ($/mo)"><input value={form.price} onChange={e=>set("price",e.target.value)} placeholder="3500" /></Field>
         <Field label="Bedrooms"><input value={form.bed} onChange={e=>set("bed",e.target.value)} placeholder="Studio, 1BR..." /></Field>
       </div>
+      <Field label="Amenities"><input value={form.amenities} onChange={e=>set("amenities",e.target.value)} placeholder="e.g. Doorman, Gym, Rooftop" /></Field>
       <Field label="Notes"><textarea value={form.notes} onChange={e=>set("notes",e.target.value)} rows={2} placeholder="First impressions, broker contact, etc." /></Field>
       <button onClick={submit} style={{width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13,marginTop:4}}>Add to Saved</button>
     </Modal>
@@ -356,21 +386,6 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
     setEditingAgent(false);
   };
 
-  // Multi-file screenshot upload
-  const handleScreenshots=(e)=>{
-    const files=Array.from(e.target.files);
-    files.forEach(file=>{
-      const reader=new FileReader();
-      reader.onload=(ev)=>{
-        onUpdate(prev=>{
-          const current=prev||listing;
-          return{...current,screenshots:[...(current.screenshots||[]),{id:uid(),data:ev.target.result,name:file.name,date:today()}]};
-        });
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-  // Actually we need a simpler approach for multi-file since onUpdate expects the full object
   const handlePhotoUpload=(e)=>{
     const files=Array.from(e.target.files);
     let screenshots=[...(listing.screenshots||[])];
@@ -419,7 +434,7 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
       {/* Header */}
       <div style={{marginBottom:16,marginTop:-8}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-          <span style={{background:stage.color+"22",color:stage.color,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600}}>{stage.emoji} {stage.label}</span>
+          <span style={{background:stage.color+"22",color:stage.color,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600}}>{stage.label}</span>
           {listing.url&&<a href={listing.url} target="_blank" style={{fontSize:11,color:"#38bdf8",textDecoration:"none"}}>View listing ↗</a>}
         </div>
         {editing?(
@@ -431,6 +446,7 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
               <Field label="Price"><input value={form.price} onChange={e=>setForm(p=>({...p,price:e.target.value}))} /></Field>
               <Field label="Bed"><input value={form.bed} onChange={e=>setForm(p=>({...p,bed:e.target.value}))} /></Field>
             </div>
+            <Field label="Amenities"><input value={form.amenities} onChange={e=>setForm(p=>({...p,amenities:e.target.value}))} /></Field>
             <div style={{display:"flex",gap:8}}>
               <button onClick={saveEdit} style={{padding:"6px 16px",background:"#fff",color:"#000",borderRadius:6,fontSize:12,fontWeight:500}}>Save</button>
               <button onClick={()=>setEditing(false)} style={{padding:"6px 16px",background:"#222",color:"#888",borderRadius:6,fontSize:12}}>Cancel</button>
@@ -468,7 +484,7 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
                 color:listing.stage===s.id?s.color:"#555",
                 border:listing.stage===s.id?"1px solid "+s.color+"55":"1px solid #1a1a1a",
               }}>
-              {s.emoji} {s.label}
+              {s.label}
             </button>
           ))}
         </div>
@@ -488,6 +504,12 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
       {/* Details Tab */}
       {tab==="details"&&(
         <div>
+          {/* Star Rating */}
+          <div style={{marginBottom:20}}>
+            <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:8}}>Rating</div>
+            <StarRating rating={listing.rating||0} onRate={(r)=>onUpdate({...listing,rating:r})} />
+          </div>
+
           {/* Agent / Broker Contact */}
           <div style={{marginBottom:20}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
@@ -511,8 +533,8 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
                     <div style={{fontSize:14,fontWeight:600,marginBottom:2}}>{agent.name}</div>
                     {agent.company&&<div style={{fontSize:12,color:"#888",marginBottom:6}}>{agent.company}</div>}
                     <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
-                      {agent.phone&&<a href={"tel:"+agent.phone} style={{fontSize:12,color:"#38bdf8",textDecoration:"none"}}>📞 {agent.phone}</a>}
-                      {agent.email&&<a href={"mailto:"+agent.email} style={{fontSize:12,color:"#38bdf8",textDecoration:"none"}}>✉ {agent.email}</a>}
+                      {agent.phone&&<a href={"tel:"+agent.phone} style={{fontSize:12,color:"#38bdf8",textDecoration:"none"}}>Phone: {agent.phone}</a>}
+                      {agent.email&&<a href={"mailto:"+agent.email} style={{fontSize:12,color:"#38bdf8",textDecoration:"none"}}>Email: {agent.email}</a>}
                     </div>
                   </div>
                 ):(
@@ -527,6 +549,14 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username}){
             <div style={{marginBottom:16}}>
               <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Description</div>
               <div style={{fontSize:12,color:"#888",lineHeight:1.6}}>{listing.description}</div>
+            </div>
+          )}
+
+          {/* Amenities */}
+          {listing.amenities&&(
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Amenities</div>
+              <div style={{fontSize:12,color:"#ccc",lineHeight:1.6}}>{listing.amenities}</div>
             </div>
           )}
 
@@ -648,6 +678,24 @@ function UsernamePrompt({onSet}){
   );
 }
 
+// ── Filtered Column View Modal ────────────────────────────────────────────────
+function FilteredStageModal({stage,listings,onClose,onCardClick}){
+  return(
+    <Modal title={stage.label+" ("+listings.length+")"} onClose={onClose} wide>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:16}}>
+        {listings.map(l=>(
+          <div key={l.id} onClick={()=>{onCardClick(l);onClose()}} style={{cursor:"pointer"}}>
+            <ListingCard listing={l} onClick={onCardClick} />
+          </div>
+        ))}
+      </div>
+      {listings.length===0&&(
+        <div style={{textAlign:"center",color:"#333",padding:40,fontSize:14}}>No listings in {stage.label}</div>
+      )}
+    </Modal>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 function App(){
   const[data,setDataRaw]=useState(loadLocal);
@@ -656,7 +704,17 @@ function App(){
   const[fbConnected,setFbConnected]=useState(false);
   const[dragging,setDragging]=useState(null);
   const[username,setUsernameState]=useState(()=>localStorage.getItem("borough-username")||"");
+  const[showGettingStarted,setShowGettingStarted]=useState(()=>{
+    const dismissed=localStorage.getItem("borough-onboarded");
+    return !dismissed;
+  });
+  const[filteredStage,setFilteredStage]=useState(null);
   const setUsername=(name)=>{localStorage.setItem("borough-username",name);setUsernameState(name)};
+
+  const dismissGettingStarted=()=>{
+    localStorage.setItem("borough-onboarded","true");
+    setShowGettingStarted(false);
+  };
 
   const setData=useCallback((fn)=>{
     setDataRaw(prev=>{
@@ -726,6 +784,9 @@ function App(){
         </div>
       </div>
 
+      {/* Getting Started Banner */}
+      {showGettingStarted&&<GettingStartedBanner onDismiss={dismissGettingStarted} />}
+
       {/* Kanban Board */}
       <div style={{display:"flex",gap:12,padding:"16px 20px",flex:1,overflowX:"auto"}}>
         {STAGES.map(stage=>(
@@ -736,6 +797,7 @@ function App(){
             onCardClick={(l)=>setSelected(l)}
             onDrop={handleDrop}
             onDragStart={setDragging}
+            onHeaderClick={()=>setFilteredStage(stage)}
           />
         ))}
       </div>
@@ -744,6 +806,7 @@ function App(){
       {modal==="add"&&<AddListingModal onClose={()=>setModal(null)} onAdd={addListing} />}
       {modal==="share"&&<ShareModal onClose={()=>setModal(null)} connected={fbConnected} boardId={data.boardId} />}
       {selected&&<DetailModal listing={listings.find(l=>l.id===selected.id)||selected} onClose={()=>setSelected(null)} onUpdate={updateListing} onDelete={deleteListing} username={username} />}
+      {filteredStage&&<FilteredStageModal stage={filteredStage} listings={listings.filter(l=>(l.stage||"saved")===filteredStage.id)} onClose={()=>setFilteredStage(null)} onCardClick={(l)=>setSelected(l)} />}
     </div>
   );
 }
