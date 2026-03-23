@@ -153,13 +153,24 @@ async function scrapeBuildingUrl(url){
       const image=meta("og:image")||"";
       if(!title||/access denied|forbidden|blocked|error/i.test(title))continue;
       const fullText=(title+" "+desc+" "+doc.body.innerText.substring(0,5000)).replace(/\s+/g," ");
-      // Extract building name from title (strip suffixes like "| Apartments in NYC")
-      const name=title.replace(/\s*[-|].*(apartments?|rent|nyc|new york|living|home|residence).*/i,"").trim();
+      // Extract building name from title — try after pipe/dash first if before is generic
+      let name="";
+      const parts=title.split(/\s*[|]\s*/);
+      if(parts.length>=2){
+        // Pick the part that looks like a building name (shorter, not "apartments for rent...")
+        const clean=parts.map(p=>p.trim()).filter(p=>p.length>0);
+        const nonGeneric=clean.filter(p=>!/^apartments?\s|for\s+rent|available|homes?\s/i.test(p));
+        name=nonGeneric.length>0?nonGeneric[nonGeneric.length-1]:clean[clean.length-1];
+      } else {
+        name=title.replace(/\s*[-].*(apartments?|rent|nyc|new york|living|home|residence).*/i,"").trim();
+      }
+      name=name.replace(/\s*[-|].*$/,"").trim();
       // Extract address — look for street pattern in header, meta, or body
       let address="";
       const addrEl=doc.querySelector('[class*="address"],[class*="location"],[itemtype*="PostalAddress"]');
       if(addrEl)address=addrEl.textContent.replace(/\s+/g," ").trim().substring(0,100);
       if(!address){const am=fullText.match(/(\d+\s+[\w\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Dr|Pl|Way|Ct|Ln|Broadway)[^,|]*)/i);if(am)address=am[1].trim();}
+      address=address.replace(/\s*\|.*$/,"").trim();
       // Extract neighborhood
       let neighborhood="";
       const nm=fullText.match(/(?:in|at|of)\s+(?:the\s+)?([\w\s]+?)(?:\s*[,.|]|\s+(?:NYC|New York|apartments?|neighborhood))/i);
