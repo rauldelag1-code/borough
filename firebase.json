@@ -4,6 +4,7 @@
     "ignore": [
       "firebase.json",
       ".firebaserc",
+      "firestore.rules",
       "borough-mvp_2.jsx"
     ],
     "rewrites": [
@@ -23,5 +24,8 @@
         ]
       }
     ]
+  },
+  "firestore": {
+    "rules": "firestore.rules"
   }
 }

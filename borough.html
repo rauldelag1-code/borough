@@ -8,7 +8,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
@@ -24,6 +25,9 @@
     .star-rating{display:inline-flex;gap:4px;user-select:none}
     .star{font-size:20px;cursor:pointer;opacity:.3;transition:opacity .15s}
     .star.filled{opacity:1}
+    .compare-check{position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:6px;border:2px solid #444;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;transition:all .15s}
+    .compare-check.active{border-color:#38bdf8;background:rgba(56,189,248,.2)}
+    .compare-check:hover{border-color:#666}
   </style>
 </head>
 <body>
@@ -32,7 +36,6 @@
 const{useState,useEffect,useRef,useCallback}=React;
 
 // ── Config ───────────────────────────────────────────────────────────────────
-const STORAGE_KEY="borough-v3";
 const FIREBASE_CONFIG={
   apiKey:"AIzaSyB408BlWYcfK8vvbyZ3VHgJlFOATRAQmig",
   authDomain:"borough-dfc1d.firebaseapp.com",
@@ -42,34 +45,60 @@ const FIREBASE_CONFIG={
   messagingSenderId:"191989094336",
   appId:"1:191989094336:web:c1c3e594608a54a90f1a25",
 };
-const DEFAULT_BOARD_ID="borough-main";
+
+// Initialize Firebase
+const fbApp=firebase.initializeApp(FIREBASE_CONFIG);
+const auth=fbApp.auth();
+const db=fbApp.firestore();
 
 // ── Pipeline Stages ──────────────────────────────────────────────────────────
 const STAGES=[
-  {id:"saved",label:"Saved",color:"#666"},
-  {id:"touring",label:"Touring",color:"#38bdf8"},
+  {id:"considering",label:"Considering",color:"#666"},
+  {id:"toured",label:"Toured",color:"#38bdf8"},
   {id:"applied",label:"Applied",color:"#a78bfa"},
-  {id:"approved",label:"Approved",color:"#34d399"},
-  {id:"signed",label:"Signed",color:"#fbbf24"},
+  {id:"rejected",label:"Rejected",color:"#ef4444"},
+  {id:"waitlisted",label:"Waitlisted",color:"#fbbf24"},
+  {id:"archived",label:"Archived",color:"#555"},
 ];
 const STAGE_MAP=Object.fromEntries(STAGES.map(s=>[s.id,s]));
 
-// ── Data ─────────────────────────────────────────────────────────────────────
-const blank=()=>({listings:[],buildings:[],firebaseConfig:FIREBASE_CONFIG,boardId:DEFAULT_BOARD_ID});
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const uid=()=>Math.random().toString(36).slice(2,9);
+const today=()=>new Date().toISOString().slice(0,10);
+const fmtDate=(d)=>{if(!d)return"";const p=new Date(d+"T12:00:00");return p.toLocaleDateString("en-US",{month:"short",day:"numeric"})};
 
-function loadLocal(){
-  try{
-    const d=localStorage.getItem(STORAGE_KEY);
-    if(!d)return blank();
-    const parsed=JSON.parse(d);
-    if(!parsed.firebaseConfig)parsed.firebaseConfig=FIREBASE_CONFIG;
-    if(!parsed.boardId)parsed.boardId=DEFAULT_BOARD_ID;
-    if(!parsed.listings)parsed.listings=[];
-    if(!parsed.buildings)parsed.buildings=[];
-    return parsed;
-  }catch{return blank()}
+// ── Screenshot Local Storage ─────────────────────────────────────────────────
+function saveScreenshotsLocal(listingId,screenshots){
+  try{const all=JSON.parse(localStorage.getItem("borough-screenshots")||"{}");all[listingId]=screenshots;localStorage.setItem("borough-screenshots",JSON.stringify(all))}catch{}
 }
-function saveLocal(d){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(d))}catch{}}
+function getScreenshotsLocal(listingId){
+  try{const all=JSON.parse(localStorage.getItem("borough-screenshots")||"{}");return all[listingId]||[]}catch{return[]}
+}
+function deleteScreenshotsLocal(listingId){
+  try{const all=JSON.parse(localStorage.getItem("borough-screenshots")||"{}");delete all[listingId];localStorage.setItem("borough-screenshots",JSON.stringify(all))}catch{}
+}
+
+// ── Firestore Helpers ────────────────────────────────────────────────────────
+function getDataRef(userDoc){
+  if(userDoc&&userDoc.workspaceId){
+    return db.collection("workspaces").doc(userDoc.workspaceId);
+  }
+  return null;
+}
+
+function getListingsRef(userId,userDoc){
+  if(userDoc&&userDoc.workspaceId){
+    return db.collection("workspaces").doc(userDoc.workspaceId).collection("listings");
+  }
+  return db.collection("users").doc(userId).collection("listings");
+}
+
+function getBuildingsRef(userId,userDoc){
+  if(userDoc&&userDoc.workspaceId){
+    return db.collection("workspaces").doc(userDoc.workspaceId).collection("buildings");
+  }
+  return db.collection("users").doc(userId).collection("buildings");
+}
 
 // ── URL Scraper ──────────────────────────────────────────────────────────────
 function parseUrlHints(url){
@@ -113,7 +142,6 @@ async function scrapeUrl(url){
       if(!res.ok)continue;
       const html=await res.text();
       if(html.length<200)continue;
-      // Detect blocked / access-denied pages
       const lower=html.substring(0,2000).toLowerCase();
       if(BLOCK_KEYWORDS.some(kw=>lower.includes(kw))&&!lower.includes("og:title"))continue;
       const doc=new DOMParser().parseFromString(html,"text/html");
@@ -121,7 +149,6 @@ async function scrapeUrl(url){
       const title=meta("og:title")||doc.title||"";
       const desc=meta("og:description")||meta("description")||"";
       const image=meta("og:image")||"";
-      // Skip if title looks like an error page
       if(!title||/access denied|forbidden|blocked|error/i.test(title))continue;
       let price="";const pm=(desc+" "+title).match(/\$[\d,]+/);if(pm)price=pm[0].replace(/[$,]/g,"");
       let bed="";const bm=(desc+" "+title).match(/(\d)\s*(?:bed|br|bedroom)/i);if(bm)bed=bm[1]==="0"?"Studio":bm[1]+"BR";
@@ -135,7 +162,6 @@ async function scrapeUrl(url){
   return null;
 }
 
-// ── Building URL Scraper ─────────────────────────────────────────────────────
 async function scrapeBuildingUrl(url){
   const BLOCK_KEYWORDS=["access denied","captcha","blocked","forbidden","please verify","are you a robot","security check"];
   for(const proxy of CORS_PROXIES){
@@ -153,11 +179,9 @@ async function scrapeBuildingUrl(url){
       const image=meta("og:image")||"";
       if(!title||/access denied|forbidden|blocked|error/i.test(title))continue;
       const fullText=(title+" "+desc+" "+doc.body.innerText.substring(0,5000)).replace(/\s+/g," ");
-      // Extract building name from title — try after pipe/dash first if before is generic
       let name="";
       const parts=title.split(/\s*[|]\s*/);
       if(parts.length>=2){
-        // Pick the part that looks like a building name (shorter, not "apartments for rent...")
         const clean=parts.map(p=>p.trim()).filter(p=>p.length>0);
         const nonGeneric=clean.filter(p=>!/^apartments?\s|for\s+rent|available|homes?\s/i.test(p));
         name=nonGeneric.length>0?nonGeneric[nonGeneric.length-1]:clean[clean.length-1];
@@ -165,20 +189,16 @@ async function scrapeBuildingUrl(url){
         name=title.replace(/\s*[-].*(apartments?|rent|nyc|new york|living|home|residence).*/i,"").trim();
       }
       name=name.replace(/\s*[-|].*$/,"").trim();
-      // Extract address — look for street pattern in header, meta, or body
       let address="";
       const addrEl=doc.querySelector('[class*="address"],[class*="location"],[itemtype*="PostalAddress"]');
       if(addrEl)address=addrEl.textContent.replace(/\s+/g," ").trim().substring(0,100);
       if(!address){const am=fullText.match(/(\d+\s+[\w\s.]+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Rd|Dr|Pl|Way|Ct|Ln|Broadway)[^,|]*)/i);if(am)address=am[1].trim();}
       address=address.replace(/\s*\|.*$/,"").trim();
-      // Extract neighborhood
       let neighborhood="";
       const nm=fullText.match(/(?:in|at|of)\s+(?:the\s+)?([\w\s]+?)(?:\s*[,.|]|\s+(?:NYC|New York|apartments?|neighborhood))/i);
       if(nm)neighborhood=nm[1].replace(/(?:the|our|this)\s*/i,"").trim();
-      // Extract phone number
       let phone="";
       const pm=fullText.match(/(\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4})/);if(pm)phone=pm[1];
-      // Detect amenities from page text
       const amenities={};
       const lowerFull=fullText.toLowerCase();
       if(/\b(?:doorman|concierge|door\s*man|24.?hour.*(?:door|lobby|staff))\b/i.test(lowerFull))amenities.Doorman=true;
@@ -187,7 +207,6 @@ async function scrapeBuildingUrl(url){
       if(/\b(?:roof(?:top)?|terrace|deck|sky\s*lounge)\b/i.test(lowerFull))amenities.Rooftop=true;
       if(/\b(?:pet|dog|cat)\b/i.test(lowerFull))amenities["Pet Policy"]=true;
       if(/\b(?:parking|garage|valet)\b/i.test(lowerFull))amenities.Parking=true;
-      // Detect other amenities
       const otherAmenities=[];
       if(/\b(?:pool|swimming)\b/i.test(lowerFull))otherAmenities.push("Pool");
       if(/\b(?:lounge|club\s*room|resident.*lounge)\b/i.test(lowerFull))otherAmenities.push("Lounge");
@@ -195,7 +214,6 @@ async function scrapeBuildingUrl(url){
       if(/\b(?:storage|closet)\b/i.test(lowerFull))otherAmenities.push("Storage");
       if(/\b(?:elevator)\b/i.test(lowerFull))otherAmenities.push("Elevator");
       if(otherAmenities.length)amenities.other=otherAmenities.join(", ");
-      // Extract price range
       let minPrice="",maxPrice="";
       const prices=fullText.match(/\$[\d,]+/g);
       if(prices&&prices.length>0){
@@ -203,7 +221,6 @@ async function scrapeBuildingUrl(url){
         if(nums.length>=2){minPrice=String(nums[0]);maxPrice=String(nums[nums.length-1]);}
         else if(nums.length===1)minPrice=String(nums[0]);
       }
-      // Bed types for description
       let bedTypes="";
       if(/studio/i.test(fullText))bedTypes+="Studio, ";
       const bedMatch=fullText.match(/(\w+(?:,\s*\w+)*(?:,?\s*and\s+\w+)?)[- ]bedroom/i);
@@ -216,43 +233,6 @@ async function scrapeBuildingUrl(url){
   }
   return null;
 }
-
-// ── Firebase ─────────────────────────────────────────────────────────────────
-let fbApp=null,fbDb=null,fbRef=null;
-let lastLocalWrite=0; // timestamp of last local write to prevent overwrite race
-
-function initFirebase(config,boardId){
-  try{
-    if(fbApp)fbApp.delete().catch(()=>{});
-    fbApp=firebase.initializeApp(config,"borough-"+Date.now());
-    fbDb=fbApp.database();
-    fbRef=fbDb.ref("boards/"+boardId);
-    return true;
-  }catch(e){console.error("Firebase init error:",e);return false}
-}
-function subscribeFirebase(onData){
-  if(!fbRef)return ()=>{};
-  const cb=fbRef.on("value",snap=>{const v=snap.val();if(v)onData(v)});
-  return ()=>fbRef.off("value",cb);
-}
-// Strip large base64 screenshot data before sending to Firebase (keeps URLs, strips data:image blobs)
-function stripScreenshotsForFirebase(listings){
-  return listings.map(l=>{
-    if(!l.screenshots||l.screenshots.length===0)return l;
-    return{...l,screenshots:l.screenshots.map(s=>s.data&&s.data.length>1000?{...s,data:"[local]"}:s)};
-  });
-}
-function pushFirebase(listings,buildings){
-  if(!fbRef)return;
-  lastLocalWrite=Date.now();
-  const clean=stripScreenshotsForFirebase(listings);
-  fbRef.set({listings:clean,buildings:buildings||[],updatedAt:Date.now()}).catch(e=>console.error("Firebase write error:",e));
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-const uid=()=>Math.random().toString(36).slice(2,9);
-const today=()=>new Date().toISOString().slice(0,10);
-const fmtDate=(d)=>{if(!d)return"";const p=new Date(d+"T12:00:00");return p.toLocaleDateString("en-US",{month:"short",day:"numeric"})};
 
 // ── Components ───────────────────────────────────────────────────────────────
 
@@ -279,13 +259,150 @@ function Field({label,children}){
   );
 }
 
-// ── Star Rating Component ────────────────────────────────────────────────────
 function StarRating({rating,onRate}){
   return(
     <div className="star-rating">
       {[1,2,3,4,5].map(i=>(
-        <span key={i} className={"star"+(i<=rating?" filled":"")} onClick={()=>onRate(i)} style={{opacity:i<=rating?1:0.3}}>★</span>
+        <span key={i} className={"star"+(i<=rating?" filled":"")} onClick={()=>onRate&&onRate(i)} style={{opacity:i<=rating?1:0.3,cursor:onRate?"pointer":"default"}}>★</span>
       ))}
+    </div>
+  );
+}
+
+// ── Auth Screen ──────────────────────────────────────────────────────────────
+function AuthScreen(){
+  const[mode,setMode]=useState("login");
+  const[email,setEmail]=useState("");
+  const[password,setPassword]=useState("");
+  const[displayName,setDisplayName]=useState("");
+  const[error,setError]=useState("");
+  const[loading,setLoading]=useState(false);
+
+  const handleGoogle=async()=>{
+    setError("");setLoading(true);
+    try{
+      const provider=new firebase.auth.GoogleAuthProvider();
+      await auth.signInWithPopup(provider);
+    }catch(e){setError(e.message)}
+    setLoading(false);
+  };
+
+  const handleEmailLogin=async()=>{
+    if(!email||!password){setError("Please fill in all fields");return}
+    setError("");setLoading(true);
+    try{
+      await auth.signInWithEmailAndPassword(email,password);
+    }catch(e){
+      if(e.code==="auth/user-not-found")setError("No account found with this email");
+      else if(e.code==="auth/wrong-password"||e.code==="auth/invalid-credential")setError("Incorrect password");
+      else setError(e.message);
+    }
+    setLoading(false);
+  };
+
+  const handleEmailSignup=async()=>{
+    if(!email||!password||!displayName){setError("Please fill in all fields");return}
+    if(password.length<6){setError("Password must be at least 6 characters");return}
+    setError("");setLoading(true);
+    try{
+      const cred=await auth.createUserWithEmailAndPassword(email,password);
+      await cred.user.updateProfile({displayName});
+      await cred.user.sendEmailVerification();
+    }catch(e){
+      if(e.code==="auth/email-already-in-use")setError("An account with this email already exists");
+      else setError(e.message);
+    }
+    setLoading(false);
+  };
+
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0a0a"}}>
+      <div className="fade" style={{background:"#111",border:"1px solid #222",borderRadius:16,padding:40,width:400,maxWidth:"95vw"}}>
+        <h1 style={{fontSize:28,fontWeight:700,marginBottom:4,letterSpacing:"-0.5px"}}>Borough</h1>
+        <p style={{fontSize:13,color:"#666",marginBottom:28}}>Track your apartment hunt</p>
+
+        {/* Google Sign-In */}
+        <button onClick={handleGoogle} disabled={loading} style={{
+          width:"100%",padding:12,background:"#fff",color:"#000",borderRadius:8,fontSize:13,fontWeight:600,marginBottom:16,
+          display:"flex",alignItems:"center",justifyContent:"center",gap:10,opacity:loading?.6:1
+        }}>
+          <svg width="18" height="18" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+          Continue with Google
+        </button>
+
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+          <div style={{flex:1,height:1,background:"#222"}}/>
+          <span style={{fontSize:11,color:"#555"}}>or</span>
+          <div style={{flex:1,height:1,background:"#222"}}/>
+        </div>
+
+        {/* Email/Password */}
+        {mode==="signup"&&(
+          <Field label="Display Name">
+            <input value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="Your first name" autoFocus />
+          </Field>
+        )}
+        <Field label="Email">
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@email.com" autoFocus={mode==="login"} />
+        </Field>
+        <Field label="Password">
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder={mode==="signup"?"At least 6 characters":"Your password"} onKeyDown={e=>{if(e.key==="Enter"){mode==="login"?handleEmailLogin():handleEmailSignup()}}} />
+        </Field>
+
+        {error&&<div style={{fontSize:12,color:"#ef4444",marginBottom:12,padding:10,background:"rgba(239,68,68,.08)",borderRadius:6}}>{error}</div>}
+
+        <button onClick={mode==="login"?handleEmailLogin:handleEmailSignup} disabled={loading} style={{
+          width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13,marginBottom:16,opacity:loading?.6:1
+        }}>
+          {loading?"Please wait...":mode==="login"?"Sign In":"Create Account"}
+        </button>
+
+        <div style={{textAlign:"center",fontSize:12,color:"#555"}}>
+          {mode==="login"?(
+            <span>Don't have an account? <button onClick={()=>{setMode("signup");setError("")}} style={{color:"#38bdf8",background:"none",fontSize:12,textDecoration:"underline"}}>Sign up</button></span>
+          ):(
+            <span>Already have an account? <button onClick={()=>{setMode("login");setError("")}} style={{color:"#38bdf8",background:"none",fontSize:12,textDecoration:"underline"}}>Sign in</button></span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Verify Email Screen ──────────────────────────────────────────────────────
+function VerifyEmailScreen({user}){
+  const[sent,setSent]=useState(false);
+  const[checking,setChecking]=useState(false);
+
+  const resend=async()=>{
+    try{await user.sendEmailVerification();setSent(true);setTimeout(()=>setSent(false),3000)}catch{}
+  };
+
+  const checkVerification=async()=>{
+    setChecking(true);
+    await user.reload();
+    if(user.emailVerified)window.location.reload();
+    else setChecking(false);
+  };
+
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0a0a"}}>
+      <div className="fade" style={{background:"#111",border:"1px solid #222",borderRadius:16,padding:40,width:420,maxWidth:"95vw",textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>✉️</div>
+        <h2 style={{fontSize:20,fontWeight:700,marginBottom:8}}>Check your email</h2>
+        <p style={{fontSize:13,color:"#888",marginBottom:24,lineHeight:1.6}}>
+          We sent a verification link to <strong style={{color:"#fff"}}>{user.email}</strong>. Click the link in the email, then come back here.
+        </p>
+        <button onClick={checkVerification} disabled={checking} style={{
+          width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13,marginBottom:12,opacity:checking?.6:1
+        }}>
+          {checking?"Checking...":"I've verified my email"}
+        </button>
+        <button onClick={resend} style={{width:"100%",padding:10,background:"#161616",color:"#888",borderRadius:8,fontSize:12,border:"1px solid #222"}}>
+          {sent?"Sent!":"Resend verification email"}
+        </button>
+        <button onClick={()=>auth.signOut()} style={{marginTop:16,background:"none",color:"#555",fontSize:12,textDecoration:"underline"}}>Sign out</button>
+      </div>
     </div>
   );
 }
@@ -306,12 +423,13 @@ function GettingStartedBanner({onDismiss}){
 }
 
 // ── Listing Card (Kanban) ────────────────────────────────────────────────────
-function ListingCard({listing,onClick,onDragStart}){
-  const stage=STAGE_MAP[listing.stage]||STAGE_MAP.saved;
+function ListingCard({listing,onClick,onDragStart,compareSelected,onCompareToggle}){
+  const stage=STAGE_MAP[listing.stage]||STAGE_MAP.considering;
   const hasNotes=listing.notes&&listing.notes.trim();
   const eventCount=(listing.timeline||[]).length;
-  // Show scraped photo, or fall back to first uploaded screenshot
-  const cardImage=listing.photoUrl||((listing.screenshots||[]).find(s=>s.data&&s.data!=="[local]")||{}).data||"";
+  const screenshots=getScreenshotsLocal(listing.id);
+  const cardImage=listing.photoUrl||(screenshots.length>0?screenshots[0].data:"")||"";
+  const isCompare=compareSelected||false;
 
   return(
     <div
@@ -319,12 +437,16 @@ function ListingCard({listing,onClick,onDragStart}){
       onDragStart={(e)=>{e.dataTransfer.setData("text/plain",listing.id);onDragStart&&onDragStart(listing.id)}}
       onClick={()=>onClick(listing)}
       style={{
-        background:"#161616",border:"1px solid #222",borderRadius:10,padding:14,marginBottom:10,cursor:"grab",
-        transition:"all .15s",borderLeft:"3px solid "+stage.color,
+        background:"#161616",border:"1px solid "+(isCompare?"#38bdf8":"#222"),borderRadius:10,padding:14,marginBottom:10,cursor:"grab",
+        transition:"all .15s",borderLeft:"3px solid "+stage.color,position:"relative",
       }}
-      onMouseEnter={e=>{e.currentTarget.style.borderColor="#444";e.currentTarget.style.background="#1a1a1a"}}
-      onMouseLeave={e=>{e.currentTarget.style.borderColor="#222";e.currentTarget.style.background="#161616";e.currentTarget.style.borderLeft="3px solid "+stage.color}}
+      onMouseEnter={e=>{if(!isCompare)e.currentTarget.style.borderColor="#444";e.currentTarget.style.background="#1a1a1a"}}
+      onMouseLeave={e=>{if(!isCompare)e.currentTarget.style.borderColor="#222";e.currentTarget.style.background="#161616";e.currentTarget.style.borderLeft="3px solid "+stage.color}}
     >
+      {/* Compare checkbox */}
+      <div className={"compare-check"+(isCompare?" active":"")} onClick={e=>{e.stopPropagation();onCompareToggle&&onCompareToggle(listing.id)}}>
+        {isCompare&&<span style={{color:"#38bdf8",fontSize:14,fontWeight:700}}>✓</span>}
+      </div>
       {cardImage&&(
         <div style={{marginBottom:10,borderRadius:6,overflow:"hidden",height:80,background:"#0a0a0a"}}>
           <img src={cardImage} style={{width:"100%",height:"100%",objectFit:"cover"}} onError={e=>{e.target.style.display="none"}} />
@@ -340,6 +462,9 @@ function ListingCard({listing,onClick,onDragStart}){
         {listing.bed&&<span style={{fontSize:12,background:"#1a1a2a",color:"#818cf8",padding:"3px 10px",borderRadius:4}}>{listing.bed}</span>}
         {listing.neighborhood&&<span style={{fontSize:12,background:"#1a1a1a",color:"#888",padding:"3px 10px",borderRadius:4}}>{listing.neighborhood}</span>}
       </div>
+      {listing.moveInDate&&(
+        <div style={{marginTop:6,fontSize:11,color:"#666"}}>Move-in: {fmtDate(listing.moveInDate)}</div>
+      )}
       {(hasNotes||eventCount>0)&&(
         <div style={{display:"flex",gap:8,marginTop:8,fontSize:10,color:"#555"}}>
           {hasNotes&&<span>notes</span>}
@@ -351,17 +476,14 @@ function ListingCard({listing,onClick,onDragStart}){
 }
 
 // ── Kanban Column ────────────────────────────────────────────────────────────
-function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart,onHeaderClick}){
+function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart,onHeaderClick,compareIds,onCompareToggle}){
   const[over,setOver]=useState(false);
-
   return(
     <div
       onDragOver={e=>{e.preventDefault();setOver(true)}}
       onDragLeave={()=>setOver(false)}
       onDrop={e=>{e.preventDefault();setOver(false);const id=e.dataTransfer.getData("text/plain");onDrop(id,stage.id)}}
-      style={{
-        minWidth:280,maxWidth:320,flex:"1 0 280px",display:"flex",flexDirection:"column",height:"calc(100vh - 70px)",
-      }}
+      style={{minWidth:240,maxWidth:280,flex:"1 0 240px",display:"flex",flexDirection:"column",height:"calc(100vh - 70px)"}}
     >
       <div style={{display:"flex",alignItems:"center",gap:8,padding:"12px 4px",marginBottom:4,cursor:"pointer"}} onClick={onHeaderClick}>
         <span style={{fontSize:12,width:8,height:8,borderRadius:"50%",background:stage.color}} />
@@ -371,15 +493,14 @@ function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart,onHeaderCli
       <div style={{
         flex:1,overflowY:"auto",padding:"4px 4px",borderRadius:8,
         background:over?"rgba(255,255,255,.03)":"transparent",
-        border:over?"1px dashed #444":"1px dashed transparent",
-        transition:"all .15s",
+        border:over?"1px dashed #444":"1px dashed transparent",transition:"all .15s",
       }}>
         {listings.map(l=>(
-          <ListingCard key={l.id} listing={l} onClick={onCardClick} onDragStart={onDragStart} />
+          <ListingCard key={l.id} listing={l} onClick={onCardClick} onDragStart={onDragStart} compareSelected={compareIds.includes(l.id)} onCompareToggle={onCompareToggle} />
         ))}
         {listings.length===0&&(
           <div style={{padding:20,textAlign:"center",color:"#333",fontSize:12}}>
-            {stage.id==="saved"?"Drop a link or click + to add":"Drag listings here"}
+            {stage.id==="considering"?"Drop a link or click + to add":"Drag listings here"}
           </div>
         )}
       </div>
@@ -389,7 +510,7 @@ function KanbanColumn({stage,listings,onCardClick,onDrop,onDragStart,onHeaderCli
 
 // ── Add Listing Modal ────────────────────────────────────────────────────────
 function AddListingModal({onClose,onAdd,buildings}){
-  const[form,setForm]=useState({name:"",address:"",neighborhood:"",amenities:"",url:"",price:"",bed:"",bath:"",notes:"",photoUrl:"",buildingId:""});
+  const[form,setForm]=useState({name:"",address:"",neighborhood:"",amenities:"",url:"",price:"",bed:"",bath:"",notes:"",photoUrl:"",buildingId:"",moveInDate:""});
   const[scraping,setScraping]=useState(false);
   const[scraped,setScraped]=useState(false);
   const scrapeTimer=useRef(null);
@@ -400,10 +521,8 @@ function AddListingModal({onClose,onAdd,buildings}){
     const url=e.target.value;
     set("url",url);
     if(!url.startsWith("http")||!url.includes("."))return;
-    // Instant URL parsing
     const hints=parseUrlHints(url);
     setForm(p=>({...p,url,name:hints.name||p.name,address:hints.address||p.address,neighborhood:hints.neighborhood||p.neighborhood,bed:hints.bed||p.bed,price:hints.price||p.price}));
-    // Debounced async scrape — wait 600ms after last keystroke
     if(scrapeTimer.current)clearTimeout(scrapeTimer.current);
     scrapeTimer.current=setTimeout(async()=>{
       setScraping(true);
@@ -422,9 +541,11 @@ function AddListingModal({onClose,onAdd,buildings}){
     onAdd({
       ...form,
       id:uid(),
-      stage:"saved",
-      timeline:[{event:"saved",date:today(),note:"Added to board"}],
+      stage:"considering",
+      rating:0,
+      timeline:[{event:"considering",date:today(),note:"Added to board"}],
       createdAt:today(),
+      updatedAt:today(),
     });
     onClose();
   };
@@ -445,10 +566,14 @@ function AddListingModal({onClose,onAdd,buildings}){
         <Field label="Price ($/mo)"><input value={form.price} onChange={e=>set("price",e.target.value)} placeholder="3500" /></Field>
         <Field label="Bedrooms"><input value={form.bed} onChange={e=>set("bed",e.target.value)} placeholder="Studio, 1BR..." /></Field>
       </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <Field label="Bathrooms"><input value={form.bath} onChange={e=>set("bath",e.target.value)} placeholder="1" /></Field>
+        <Field label="Move-in Date"><input type="date" value={form.moveInDate} onChange={e=>set("moveInDate",e.target.value)} /></Field>
+      </div>
       <Field label="Amenities"><input value={form.amenities} onChange={e=>set("amenities",e.target.value)} placeholder="e.g. Doorman, Gym, Rooftop" /></Field>
       <Field label="Building"><select value={form.buildingId} onChange={e=>set("buildingId",e.target.value)} style={{width:"100%",padding:"10px 12px",background:"#161616",border:"1px solid #2a2a2a",color:"#fff",borderRadius:8,fontSize:13,outline:"none"}}><option value="">No building linked</option>{buildings.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></Field>
       <Field label="Notes"><textarea value={form.notes} onChange={e=>set("notes",e.target.value)} rows={2} placeholder="First impressions, broker contact, etc." /></Field>
-      <button onClick={submit} style={{width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13,marginTop:4}}>Add to Saved</button>
+      <button onClick={submit} style={{width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13,marginTop:4}}>Add to Considering</button>
     </Modal>
   );
 }
@@ -462,8 +587,8 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
   const[form,setForm]=useState({...listing});
   const[agentForm,setAgentForm]=useState(listing.agent||{name:"",phone:"",email:"",company:""});
   const[tab,setTab]=useState("details");
-  const stage=STAGE_MAP[listing.stage]||STAGE_MAP.saved;
-  const dropRef=useRef(null);
+  const stage=STAGE_MAP[listing.stage]||STAGE_MAP.considering;
+  const screenshots=getScreenshotsLocal(listing.id);
 
   const addComment=()=>{
     if(!newComment.trim())return;
@@ -482,30 +607,31 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
   const moveToStage=(stageId)=>{
     const stageInfo=STAGE_MAP[stageId];
     const tl=[...(listing.timeline||[]),{event:stageId,date:today(),note:"Moved to "+stageInfo.label,author:username}];
-    onUpdate({...listing,stage:stageId,timeline:tl});
+    onUpdate({...listing,stage:stageId,timeline:tl,updatedAt:today()});
   };
 
   const saveEdit=()=>{
-    onUpdate({...listing,...form});
+    onUpdate({...listing,...form,updatedAt:today()});
     setEditing(false);
   };
 
   const saveAgent=()=>{
-    onUpdate({...listing,agent:agentForm});
+    onUpdate({...listing,agent:agentForm,updatedAt:today()});
     setEditingAgent(false);
   };
 
   const handlePhotoUpload=(e)=>{
     const files=Array.from(e.target.files);
-    let screenshots=[...(listing.screenshots||[])];
+    let ss=[...screenshots];
     let loaded=0;
     files.forEach(file=>{
       const reader=new FileReader();
       reader.onload=(ev)=>{
-        screenshots=[...screenshots,{id:uid(),data:ev.target.result,name:file.name,date:today()}];
+        ss=[...ss,{id:uid(),data:ev.target.result,name:file.name,date:today()}];
         loaded++;
         if(loaded===files.length){
-          onUpdate({...listing,screenshots});
+          saveScreenshotsLocal(listing.id,ss);
+          onUpdate({...listing,updatedAt:today()});
         }
       };
       reader.readAsDataURL(file);
@@ -513,22 +639,26 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
   };
 
   const deleteScreenshot=(ssId)=>{
-    onUpdate({...listing,screenshots:(listing.screenshots||[]).filter(s=>s.id!==ssId)});
+    const updated=screenshots.filter(s=>s.id!==ssId);
+    saveScreenshotsLocal(listing.id,updated);
+    onUpdate({...listing,updatedAt:today()});
   };
 
-  // Drag and drop photos
   const handleDrop=(e)=>{
     e.preventDefault();
     const files=Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith("image/"));
     if(!files.length)return;
-    let screenshots=[...(listing.screenshots||[])];
+    let ss=[...screenshots];
     let loaded=0;
     files.forEach(file=>{
       const reader=new FileReader();
       reader.onload=(ev)=>{
-        screenshots=[...screenshots,{id:uid(),data:ev.target.result,name:file.name,date:today()}];
+        ss=[...ss,{id:uid(),data:ev.target.result,name:file.name,date:today()}];
         loaded++;
-        if(loaded===files.length) onUpdate({...listing,screenshots});
+        if(loaded===files.length){
+          saveScreenshotsLocal(listing.id,ss);
+          onUpdate({...listing,updatedAt:today()});
+        }
       };
       reader.readAsDataURL(file);
     });
@@ -536,7 +666,7 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
 
   const agent=listing.agent||{};
   const comments=listing.comments||[];
-  const tabs=[{id:"details",label:"Details"},{id:"notes",label:"Notes ("+comments.length+")"},{id:"photos",label:"Photos ("+(listing.screenshots||[]).length+")"},{id:"timeline",label:"Timeline"}];
+  const tabs=[{id:"details",label:"Details"},{id:"notes",label:"Notes ("+comments.length+")"},{id:"photos",label:"Photos ("+screenshots.length+")"},{id:"timeline",label:"Timeline"}];
 
   return(
     <Modal title="" onClose={onClose} wide>
@@ -555,6 +685,10 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
               <Field label="Price"><input value={form.price} onChange={e=>setForm(p=>({...p,price:e.target.value}))} /></Field>
               <Field label="Bed"><input value={form.bed} onChange={e=>setForm(p=>({...p,bed:e.target.value}))} /></Field>
             </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Field label="Bathrooms"><input value={form.bath||""} onChange={e=>setForm(p=>({...p,bath:e.target.value}))} /></Field>
+              <Field label="Move-in Date"><input type="date" value={form.moveInDate||""} onChange={e=>setForm(p=>({...p,moveInDate:e.target.value}))} /></Field>
+            </div>
             <Field label="Building"><select value={form.buildingId||""} onChange={e=>setForm(p=>({...p,buildingId:e.target.value}))} style={{width:"100%",padding:"10px 12px",background:"#161616",border:"1px solid #2a2a2a",color:"#fff",borderRadius:8,fontSize:13,outline:"none"}}><option value="">No building linked</option>{buildings.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></Field>
             <Field label="Amenities"><input value={form.amenities} onChange={e=>setForm(p=>({...p,amenities:e.target.value}))} /></Field>
             <div style={{display:"flex",gap:8}}>
@@ -569,7 +703,9 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
             <div style={{display:"flex",gap:10,marginTop:8,flexWrap:"wrap",alignItems:"center"}}>
               {listing.price&&<span style={{fontSize:13,color:"#34d399",fontWeight:600}}>${Number(listing.price).toLocaleString()}/mo</span>}
               {listing.bed&&<span style={{fontSize:12,color:"#818cf8"}}>{listing.bed}</span>}
+              {listing.bath&&<span style={{fontSize:12,color:"#888"}}>{listing.bath} bath</span>}
               {listing.neighborhood&&<span style={{fontSize:12,color:"#888"}}>{listing.neighborhood}</span>}
+              {listing.moveInDate&&<span style={{fontSize:12,color:"#666"}}>Move-in: {fmtDate(listing.moveInDate)}</span>}
               <button onClick={()=>setEditing(true)} style={{fontSize:11,color:"#555",background:"none",textDecoration:"underline"}}>edit details</button>
             </div>
           </div>
@@ -614,13 +750,11 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
       {/* Details Tab */}
       {tab==="details"&&(
         <div>
-          {/* Star Rating */}
           <div style={{marginBottom:20}}>
             <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:8}}>Rating</div>
-            <StarRating rating={listing.rating||0} onRate={(r)=>onUpdate({...listing,rating:r})} />
+            <StarRating rating={listing.rating||0} onRate={(r)=>onUpdate({...listing,rating:r,updatedAt:today()})} />
           </div>
 
-          {/* Agent / Broker Contact */}
           <div style={{marginBottom:20}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
               <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px"}}>Agent / Broker</div>
@@ -654,7 +788,6 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
             )}
           </div>
 
-          {/* Quick Info */}
           {listing.description&&(
             <div style={{marginBottom:16}}>
               <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Description</div>
@@ -662,7 +795,6 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
             </div>
           )}
 
-          {/* Amenities */}
           {listing.amenities&&(
             <div style={{marginBottom:16}}>
               <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Amenities</div>
@@ -670,16 +802,15 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
             </div>
           )}
 
-          {/* Delete */}
           <button onClick={()=>{if(confirm("Delete this listing permanently?"))onDelete(listing.id)}} style={{width:"100%",padding:10,background:"#1a1111",color:"#ef4444",borderRadius:6,fontSize:12,border:"1px solid #2a1515",marginTop:8}}>Delete listing</button>
         </div>
       )}
 
-      {/* Notes Tab — collaborative, name-tagged */}
+      {/* Notes Tab */}
       {tab==="notes"&&(
         <div>
           <div style={{display:"flex",gap:8,marginBottom:16}}>
-            <input value={newComment} onChange={e=>setNewComment(e.target.value)} placeholder={"Add a note as "+username+"..."} onKeyDown={e=>{if(e.key==="Enter")addComment()}} style={{flex:1}} />
+            <input value={newComment} onChange={e=>setNewComment(e.target.value)} placeholder={"Add a note..."} onKeyDown={e=>{if(e.key==="Enter")addComment()}} style={{flex:1}} />
             <button onClick={addComment} style={{padding:"8px 16px",background:"#222",color:"#fff",borderRadius:6,fontSize:12,whiteSpace:"nowrap"}}>Post</button>
           </div>
           {comments.length===0&&<div style={{fontSize:12,color:"#333",textAlign:"center",padding:20}}>No notes yet. Be the first to add one!</div>}
@@ -699,7 +830,6 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
       {tab==="photos"&&(
         <div>
           <div
-            ref={dropRef}
             onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="#555";e.currentTarget.style.background="#0f0f0f"}}
             onDragLeave={e=>{e.currentTarget.style.borderColor="#333";e.currentTarget.style.background="transparent"}}
             onDrop={e=>{e.currentTarget.style.borderColor="#333";e.currentTarget.style.background="transparent";handleDrop(e)}}
@@ -707,15 +837,15 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
           >
             <label style={{cursor:"pointer"}}>
               <div style={{fontSize:13,color:"#666",marginBottom:4}}>Drop images here or click to upload</div>
-              <div style={{fontSize:11,color:"#444"}}>Supports multiple files</div>
+              <div style={{fontSize:11,color:"#444"}}>Photos are saved on this device only</div>
               <input type="file" accept="image/*" multiple onChange={handlePhotoUpload} style={{display:"none"}} />
             </label>
           </div>
-          {(listing.screenshots||[]).length===0&&!listing.photoUrl&&(
+          {screenshots.length===0&&!listing.photoUrl&&(
             <div style={{fontSize:12,color:"#333",textAlign:"center",padding:20}}>No photos yet</div>
           )}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-            {(listing.screenshots||[]).map(ss=>(
+            {screenshots.map(ss=>(
               <div key={ss.id} style={{borderRadius:8,overflow:"hidden",border:"1px solid #222",position:"relative"}}>
                 <img src={ss.data} style={{width:"100%",display:"block"}} />
                 <button onClick={()=>deleteScreenshot(ss.id)} style={{position:"absolute",top:4,right:4,background:"rgba(0,0,0,.7)",color:"#ef4444",borderRadius:4,width:20,height:20,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
@@ -753,38 +883,209 @@ function DetailModal({listing,onClose,onUpdate,onDelete,username,buildings}){
   );
 }
 
-// ── Share Modal ──────────────────────────────────────────────────────────────
-function ShareModal({onClose,connected,boardId}){
+// ── Compare Modal ────────────────────────────────────────────────────────────
+function CompareModal({listings,onClose}){
+  const fields=[
+    {key:"price",label:"Price",fmt:v=>v?"$"+Number(v).toLocaleString()+"/mo":"—"},
+    {key:"bed",label:"Beds",fmt:v=>v||"—"},
+    {key:"bath",label:"Baths",fmt:v=>v||"—"},
+    {key:"neighborhood",label:"Neighborhood",fmt:v=>v||"—"},
+    {key:"rating",label:"Rating",fmt:v=>v>0?"★".repeat(v)+"☆".repeat(5-v):"—"},
+    {key:"stage",label:"Status",fmt:v=>(STAGE_MAP[v]||{}).label||"—"},
+    {key:"moveInDate",label:"Move-in",fmt:v=>v?fmtDate(v):"—"},
+    {key:"amenities",label:"Amenities",fmt:v=>v||"—"},
+    {key:"notes",label:"Notes",fmt:v=>v?(v.length>60?v.substring(0,60)+"...":v):"—"},
+  ];
+
   return(
-    <Modal title="Share Board" onClose={onClose}>
-      <div style={{padding:16,background:connected?"rgba(52,211,153,.05)":"rgba(239,68,68,.05)",border:"1px solid "+(connected?"rgba(52,211,153,.15)":"rgba(239,68,68,.15)"),borderRadius:8,marginBottom:16}}>
-        <div style={{fontSize:13,color:connected?"#34d399":"#ef4444",fontWeight:500,marginBottom:4}}>
-          {connected?"● Connected & syncing":"● Not connected"}
-        </div>
-        <div style={{fontSize:11,color:"#555",marginTop:4}}>Board ID: <span style={{color:"#fff",fontWeight:500}}>{boardId}</span></div>
-      </div>
-      <div style={{background:"#0f0f0f",borderRadius:8,padding:16,fontSize:12,color:"#888",lineHeight:1.8}}>
-        <div style={{color:"#ccc",fontWeight:500,marginBottom:6}}>How to share:</div>
-        Send your partner this link:<br/>
-        <code style={{color:"#38bdf8",fontSize:11}}>borough-dfc1d.web.app</code><br/>
-        Changes sync automatically in real-time.
+    <Modal title={"Comparing "+listings.length+" Listings"} onClose={onClose} wide>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead>
+            <tr>
+              <th style={{textAlign:"left",padding:"8px 12px",borderBottom:"1px solid #222",color:"#666",fontWeight:500}}></th>
+              {listings.map(l=>(
+                <th key={l.id} style={{textAlign:"left",padding:"8px 12px",borderBottom:"1px solid #222",color:"#fff",fontWeight:600,minWidth:140}}>
+                  {l.name||"Untitled"}
+                  {l.address&&<div style={{fontSize:10,color:"#666",fontWeight:400,marginTop:2}}>{l.address}</div>}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {fields.map(f=>(
+              <tr key={f.key}>
+                <td style={{padding:"8px 12px",borderBottom:"1px solid #1a1a1a",color:"#888",fontWeight:500,whiteSpace:"nowrap"}}>{f.label}</td>
+                {listings.map(l=>(
+                  <td key={l.id} style={{padding:"8px 12px",borderBottom:"1px solid #1a1a1a",color:"#ccc"}}>{f.fmt(l[f.key])}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </Modal>
   );
 }
 
-// ── Username Prompt ──────────────────────────────────────────────────────────
-function UsernamePrompt({onSet}){
-  const[name,setName]=useState("");
+// ── Workspace Modal ──────────────────────────────────────────────────────────
+function WorkspaceModal({onClose,user,userDoc,onRefreshUser}){
+  const[inviteEmail,setInviteEmail]=useState("");
+  const[creating,setCreating]=useState(false);
+  const[inviting,setInviting]=useState(false);
+  const[leaving,setLeaving]=useState(false);
+  const[msg,setMsg]=useState("");
+  const[wsData,setWsData]=useState(null);
+  const[pendingInvite,setPendingInvite]=useState(null);
+
+  useEffect(()=>{
+    if(userDoc&&userDoc.workspaceId){
+      const unsub=db.collection("workspaces").doc(userDoc.workspaceId).onSnapshot(snap=>{
+        if(snap.exists)setWsData({id:snap.id,...snap.data()});
+      });
+      return ()=>unsub();
+    }
+    // Check for pending invites
+    db.collection("workspaces").where("pendingEmail","==",user.email).get().then(snap=>{
+      if(!snap.empty){
+        const doc=snap.docs[0];
+        setPendingInvite({id:doc.id,...doc.data()});
+      }
+    }).catch(()=>{});
+  },[userDoc]);
+
+  const createWorkspace=async()=>{
+    setCreating(true);setMsg("");
+    try{
+      const wsId=uid()+uid();
+      await db.collection("workspaces").doc(wsId).set({
+        members:[user.uid],
+        memberEmails:[user.email],
+        memberNames:[user.displayName||user.email],
+        createdBy:user.uid,
+        createdAt:new Date().toISOString(),
+        pendingEmail:"",
+      });
+      await db.collection("users").doc(user.uid).update({workspaceId:wsId});
+      onRefreshUser();
+      setMsg("Workspace created!");
+    }catch(e){setMsg("Error: "+e.message)}
+    setCreating(false);
+  };
+
+  const sendInvite=async()=>{
+    if(!inviteEmail||!inviteEmail.includes("@"))return;
+    setInviting(true);setMsg("");
+    try{
+      await db.collection("workspaces").doc(userDoc.workspaceId).update({pendingEmail:inviteEmail.toLowerCase().trim()});
+      setMsg("Invite sent! Tell "+inviteEmail+" to sign into Borough.");
+      setInviteEmail("");
+    }catch(e){setMsg("Error: "+e.message)}
+    setInviting(false);
+  };
+
+  const acceptInvite=async()=>{
+    if(!pendingInvite)return;
+    setCreating(true);setMsg("");
+    try{
+      const wsRef=db.collection("workspaces").doc(pendingInvite.id);
+      await wsRef.update({
+        members:firebase.firestore.FieldValue.arrayUnion(user.uid),
+        memberEmails:firebase.firestore.FieldValue.arrayUnion(user.email),
+        memberNames:firebase.firestore.FieldValue.arrayUnion(user.displayName||user.email),
+        pendingEmail:"",
+      });
+      await db.collection("users").doc(user.uid).update({workspaceId:pendingInvite.id});
+      onRefreshUser();
+      setMsg("Joined workspace!");
+      setPendingInvite(null);
+    }catch(e){setMsg("Error: "+e.message)}
+    setCreating(false);
+  };
+
+  const leaveWorkspace=async()=>{
+    if(!confirm("Leave this workspace? Your shared listings will stay with the workspace."))return;
+    setLeaving(true);
+    try{
+      const wsRef=db.collection("workspaces").doc(userDoc.workspaceId);
+      await wsRef.update({
+        members:firebase.firestore.FieldValue.arrayRemove(user.uid),
+        memberEmails:firebase.firestore.FieldValue.arrayRemove(user.email),
+        memberNames:firebase.firestore.FieldValue.arrayRemove(user.displayName||user.email),
+      });
+      await db.collection("users").doc(user.uid).update({workspaceId:""});
+      onRefreshUser();
+      onClose();
+    }catch(e){setMsg("Error: "+e.message)}
+    setLeaving(false);
+  };
+
   return(
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9999,backdropFilter:"blur(6px)"}}>
-      <div className="fade" style={{background:"#111",border:"1px solid #222",borderRadius:12,padding:32,width:360,textAlign:"center"}}>
-        <h2 style={{fontSize:20,fontWeight:700,marginBottom:8}}>Welcome to Borough</h2>
-        <p style={{fontSize:13,color:"#888",marginBottom:20}}>What's your name? This will show on your notes and updates.</p>
-        <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&name.trim())onSet(name.trim())}} placeholder="Your first name" style={{textAlign:"center",fontSize:15,marginBottom:12}} autoFocus />
-        <button onClick={()=>{if(name.trim())onSet(name.trim())}} style={{width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13}}>Continue</button>
-      </div>
-    </div>
+    <Modal title="Workspace" onClose={onClose}>
+      {/* Pending invite */}
+      {!userDoc?.workspaceId&&pendingInvite&&(
+        <div style={{background:"rgba(56,189,248,.05)",border:"1px solid rgba(56,189,248,.15)",borderRadius:8,padding:16,marginBottom:16}}>
+          <div style={{fontSize:13,fontWeight:600,color:"#38bdf8",marginBottom:4}}>You've been invited!</div>
+          <div style={{fontSize:12,color:"#888",marginBottom:12}}>
+            {pendingInvite.memberNames?.[0]||"Someone"} invited you to share a workspace. You'll both see the same listings.
+          </div>
+          <button onClick={acceptInvite} disabled={creating} style={{padding:"8px 16px",background:"#38bdf8",color:"#000",borderRadius:6,fontSize:12,fontWeight:600}}>
+            {creating?"Joining...":"Accept Invite"}
+          </button>
+        </div>
+      )}
+
+      {/* No workspace yet */}
+      {!userDoc?.workspaceId&&!pendingInvite&&(
+        <div>
+          <div style={{background:"#0f0f0f",borderRadius:8,padding:16,marginBottom:16}}>
+            <div style={{fontSize:13,fontWeight:500,marginBottom:8}}>What's a workspace?</div>
+            <div style={{fontSize:12,color:"#888",lineHeight:1.6}}>
+              A workspace lets you and a partner (roommate, significant other) share the same listings. Both of you can add, edit, and move listings in real-time.
+            </div>
+          </div>
+          <button onClick={createWorkspace} disabled={creating} style={{width:"100%",padding:12,background:"#fff",color:"#000",fontWeight:600,borderRadius:8,fontSize:13}}>
+            {creating?"Creating...":"Create a Workspace"}
+          </button>
+        </div>
+      )}
+
+      {/* Has workspace */}
+      {userDoc?.workspaceId&&wsData&&(
+        <div>
+          <div style={{background:"rgba(52,211,153,.05)",border:"1px solid rgba(52,211,153,.15)",borderRadius:8,padding:16,marginBottom:16}}>
+            <div style={{fontSize:13,color:"#34d399",fontWeight:500,marginBottom:8}}>● Active Workspace</div>
+            <div style={{fontSize:12,color:"#888"}}>
+              Members: {(wsData.memberNames||[]).join(", ")||"Just you"}
+            </div>
+          </div>
+
+          {/* Invite partner */}
+          {(wsData.members||[]).length<2&&!wsData.pendingEmail&&(
+            <div style={{marginBottom:16}}>
+              <Field label="Invite a Partner">
+                <div style={{display:"flex",gap:8}}>
+                  <input value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="partner@email.com" onKeyDown={e=>{if(e.key==="Enter")sendInvite()}} />
+                  <button onClick={sendInvite} disabled={inviting} style={{padding:"8px 16px",background:"#222",color:"#fff",borderRadius:6,fontSize:12,whiteSpace:"nowrap"}}>{inviting?"Sending...":"Invite"}</button>
+                </div>
+              </Field>
+            </div>
+          )}
+
+          {wsData.pendingEmail&&(
+            <div style={{background:"#1a1a1a",borderRadius:8,padding:12,marginBottom:16,fontSize:12,color:"#888"}}>
+              Pending invite to <strong style={{color:"#fff"}}>{wsData.pendingEmail}</strong>
+            </div>
+          )}
+
+          <button onClick={leaveWorkspace} disabled={leaving} style={{width:"100%",padding:10,background:"#1a1111",color:"#ef4444",borderRadius:6,fontSize:12,border:"1px solid #2a1515"}}>
+            {leaving?"Leaving...":"Leave Workspace"}
+          </button>
+        </div>
+      )}
+
+      {msg&&<div style={{marginTop:12,fontSize:12,color:"#34d399",textAlign:"center"}}>{msg}</div>}
+    </Modal>
   );
 }
 
@@ -795,7 +1096,7 @@ function FilteredStageModal({stage,listings,onClose,onCardClick}){
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:16}}>
         {listings.map(l=>(
           <div key={l.id} onClick={()=>{onCardClick(l);onClose()}} style={{cursor:"pointer"}}>
-            <ListingCard listing={l} onClick={onCardClick} />
+            <ListingCard listing={l} onClick={onCardClick} compareSelected={false} onCompareToggle={()=>{}} />
           </div>
         ))}
       </div>
@@ -838,8 +1139,7 @@ function BuildingCard({building,listings,onClick}){
   const linkedCount=listings.filter(l=>l.buildingId===building.id).length;
   return(
     <div onClick={onClick} style={{
-      background:"#161616",border:"1px solid #222",borderRadius:10,padding:16,cursor:"pointer",
-      transition:"all .15s",overflow:"hidden"
+      background:"#161616",border:"1px solid #222",borderRadius:10,padding:16,cursor:"pointer",transition:"all .15s",overflow:"hidden"
     }} onMouseEnter={e=>{e.currentTarget.style.borderColor="#444";e.currentTarget.style.background="#1a1a1a"}} onMouseLeave={e=>{e.currentTarget.style.borderColor="#222";e.currentTarget.style.background="#161616"}}>
       {building.photoUrl&&(
         <div style={{marginBottom:12,borderRadius:6,overflow:"hidden",height:100,background:"#0a0a0a",marginLeft:-16,marginRight:-16,marginTop:-16,marginBottom:12}}>
@@ -877,7 +1177,6 @@ function AddBuildingModal({onClose,onAdd}){
     const url=e.target.value;
     set("url",url);
     if(!url.startsWith("http")||!url.includes("."))return;
-    // Debounced async scrape — wait 600ms after last keystroke
     if(scrapeTimer.current)clearTimeout(scrapeTimer.current);
     scrapeTimer.current=setTimeout(async()=>{
       setScraping(true);
@@ -886,13 +1185,8 @@ function AddBuildingModal({onClose,onAdd}){
       if(data){
         setScraped(true);
         setForm(p=>({
-          ...p,
-          url,
-          name:data.name||p.name,
-          address:data.address||p.address,
-          neighborhood:data.neighborhood||p.neighborhood,
-          photoUrl:data.photoUrl||p.photoUrl,
-          amenities:{...p.amenities,...data.amenities},
+          ...p,url,name:data.name||p.name,address:data.address||p.address,neighborhood:data.neighborhood||p.neighborhood,
+          photoUrl:data.photoUrl||p.photoUrl,amenities:{...p.amenities,...data.amenities},
           leasingDetails:{...p.leasingDetails,minPrice:data.leasingDetails.minPrice||p.leasingDetails.minPrice,maxPrice:data.leasingDetails.maxPrice||p.leasingDetails.maxPrice},
         }));
         setTimeout(()=>setScraped(false),2500);
@@ -902,13 +1196,7 @@ function AddBuildingModal({onClose,onAdd}){
 
   const submit=()=>{
     if(!form.name&&!form.url)return;
-    onAdd({
-      ...form,
-      id:uid(),
-      rating:0,
-      comments:[],
-      createdAt:today(),
-    });
+    onAdd({...form,id:uid(),rating:0,comments:[],createdAt:today()});
     onClose();
   };
 
@@ -948,7 +1236,7 @@ function AddBuildingModal({onClose,onAdd}){
       <div style={{fontSize:13,fontWeight:600,color:"#fff",marginBottom:12,marginTop:16}}>Leasing Details</div>
       <Field label="Application Requirements"><textarea value={form.leasingDetails.appReqs} onChange={e=>setLeasingDetail("appReqs",e.target.value)} rows={2} placeholder="Credit score, income verification, etc." /></Field>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
-        <div style={{marginBottom:0}}>
+        <div>
           <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
             <input type="checkbox" checked={form.leasingDetails.brokerFee||false} onChange={e=>setLeasingDetail("brokerFee",e.target.checked)} style={{width:18,height:18,cursor:"pointer"}} />
             <span style={{fontSize:13}}>Broker Fee Required</span>
@@ -976,7 +1264,6 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
   const[editing,setEditing]=useState(false);
   const[form,setForm]=useState({...building});
   const[tab,setTab]=useState("details");
-  const dropRef=useRef(null);
 
   const addComment=()=>{
     if(!newComment.trim())return;
@@ -985,17 +1272,13 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
     setNewComment("");
   };
 
-  const saveEdit=()=>{
-    onUpdate({...building,...form});
-    setEditing(false);
-  };
+  const saveEdit=()=>{onUpdate({...building,...form});setEditing(false)};
 
   const linkedListings=listings.filter(l=>l.buildingId===building.id);
   const tabs=[{id:"details",label:"Details"},{id:"listings",label:"Listings ("+linkedListings.length+")"},{id:"notes",label:"Notes ("+((building.comments||[]).length)+")"} ];
 
   return(
     <Modal title="" onClose={onClose} wide>
-      {/* Header */}
       <div style={{marginBottom:16,marginTop:-8}}>
         {editing?(
           <div>
@@ -1031,14 +1314,12 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
         )}
       </div>
 
-      {/* Photo banner */}
       {building.photoUrl&&(
         <div style={{marginBottom:12,borderRadius:8,overflow:"hidden",maxHeight:160}}>
           <img src={building.photoUrl} style={{width:"100%",objectFit:"cover"}} onError={e=>{e.target.style.display="none"}} />
         </div>
       )}
 
-      {/* Tabs */}
       <div style={{display:"flex",gap:0,borderBottom:"1px solid #222",marginBottom:16}}>
         {tabs.map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{
@@ -1049,28 +1330,14 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
         ))}
       </div>
 
-      {/* Details Tab */}
       {tab==="details"&&(
         <div>
           <div style={{marginBottom:20}}>
             <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:8}}>Rating</div>
             <StarRating rating={building.rating||0} onRate={(r)=>onUpdate({...building,rating:r})} />
           </div>
-
-          {building.yearBuilt&&(
-            <div style={{marginBottom:16}}>
-              <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Year Built</div>
-              <div style={{fontSize:13,color:"#ccc"}}>{building.yearBuilt}</div>
-            </div>
-          )}
-
-          {building.numUnits&&(
-            <div style={{marginBottom:16}}>
-              <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Number of Units</div>
-              <div style={{fontSize:13,color:"#ccc"}}>{building.numUnits}</div>
-            </div>
-          )}
-
+          {building.yearBuilt&&<div style={{marginBottom:16}}><div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Year Built</div><div style={{fontSize:13,color:"#ccc"}}>{building.yearBuilt}</div></div>}
+          {building.numUnits&&<div style={{marginBottom:16}}><div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Number of Units</div><div style={{fontSize:13,color:"#ccc"}}>{building.numUnits}</div></div>}
           {Object.keys(building.amenities||{}).some(k=>building.amenities[k])&&(
             <div style={{marginBottom:16}}>
               <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Amenities</div>
@@ -1081,7 +1348,6 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
               </div>
             </div>
           )}
-
           {building.leasingDetails&&(building.leasingDetails.minPrice||building.leasingDetails.maxPrice)&&(
             <div style={{marginBottom:16}}>
               <div style={{fontSize:11,color:"#666",fontWeight:500,textTransform:"uppercase",letterSpacing:".5px",marginBottom:6}}>Typical Price Range</div>
@@ -1093,31 +1359,26 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
               </div>
             </div>
           )}
-
           <button onClick={()=>{if(confirm("Delete this building permanently?"))onDelete(building.id)}} style={{width:"100%",padding:10,background:"#1a1111",color:"#ef4444",borderRadius:6,fontSize:12,border:"1px solid #2a1515",marginTop:8}}>Delete building</button>
         </div>
       )}
 
-      {/* Linked Listings Tab */}
       {tab==="listings"&&(
         <div>
           {linkedListings.length===0?(
             <div style={{fontSize:12,color:"#333",textAlign:"center",padding:20}}>No listings linked to this building</div>
           ):(
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:16}}>
-              {linkedListings.map(l=>(
-                <ListingCard key={l.id} listing={l} onClick={()=>{}} />
-              ))}
+              {linkedListings.map(l=>(<ListingCard key={l.id} listing={l} onClick={()=>{}} compareSelected={false} onCompareToggle={()=>{}} />))}
             </div>
           )}
         </div>
       )}
 
-      {/* Notes Tab */}
       {tab==="notes"&&(
         <div>
           <div style={{display:"flex",gap:8,marginBottom:16}}>
-            <input value={newComment} onChange={e=>setNewComment(e.target.value)} placeholder={"Add a note as "+username+"..."} onKeyDown={e=>{if(e.key==="Enter")addComment()}} style={{flex:1}} />
+            <input value={newComment} onChange={e=>setNewComment(e.target.value)} placeholder={"Add a note..."} onKeyDown={e=>{if(e.key==="Enter")addComment()}} style={{flex:1}} />
             <button onClick={addComment} style={{padding:"8px 16px",background:"#222",color:"#fff",borderRadius:6,fontSize:12,whiteSpace:"nowrap"}}>Post</button>
           </div>
           {(building.comments||[]).length===0&&<div style={{fontSize:12,color:"#333",textAlign:"center",padding:20}}>No notes yet</div>}
@@ -1138,95 +1399,145 @@ function BuildingDetailModal({building,onClose,onUpdate,onDelete,listings,userna
 
 // ── App ──────────────────────────────────────────────────────────────────────
 function App(){
-  const[data,setDataRaw]=useState(loadLocal);
+  const[authUser,setAuthUser]=useState(undefined); // undefined=loading, null=logged out, object=logged in
+  const[userDoc,setUserDoc]=useState(null);
+  const[listings,setListings]=useState([]);
+  const[buildings,setBuildings]=useState([]);
   const[modal,setModal]=useState(null);
   const[selected,setSelected]=useState(null);
   const[selectedBuilding,setSelectedBuilding]=useState(null);
-  const[fbConnected,setFbConnected]=useState(false);
-  const[dragging,setDragging]=useState(null);
-  const[username,setUsernameState]=useState(()=>localStorage.getItem("borough-username")||"");
   const[view,setView]=useState("pipeline");
   const[sidebarCollapsed,setSidebarCollapsed]=useState(true);
-  const[showGettingStarted,setShowGettingStarted]=useState(()=>{
-    const dismissed=localStorage.getItem("borough-onboarded");
-    return !dismissed;
-  });
+  const[compareIds,setCompareIds]=useState([]);
   const[filteredStage,setFilteredStage]=useState(null);
-  const setUsername=(name)=>{localStorage.setItem("borough-username",name);setUsernameState(name)};
+  const[loading,setLoading]=useState(true);
+  const[showGettingStarted,setShowGettingStarted]=useState(()=>!localStorage.getItem("borough-onboarded"));
+  const userDocUnsub=useRef(null);
+  const listingsUnsub=useRef(null);
+  const buildingsUnsub=useRef(null);
 
-  const dismissGettingStarted=()=>{
-    localStorage.setItem("borough-onboarded","true");
-    setShowGettingStarted(false);
-  };
-
-  const setData=useCallback((fn)=>{
-    setDataRaw(prev=>{
-      const next=typeof fn==="function"?fn(prev):fn;
-      saveLocal(next);
-      if(fbConnected)pushFirebase(next.listings,next.buildings);
-      return next;
-    });
-  },[fbConnected]);
-
-  // Firebase subscription
+  // Auth state listener
   useEffect(()=>{
-    if(!data.firebaseConfig||!data.boardId)return;
-    const ok=initFirebase(data.firebaseConfig,data.boardId);
-    if(!ok)return;
-    setFbConnected(true);
-    const unsub=subscribeFirebase((remote)=>{
-      // Skip if we just wrote locally (prevent race condition overwriting new data)
-      if(Date.now()-lastLocalWrite<2000)return;
-      setDataRaw(prev=>{
-        // Merge: keep local screenshots that were stripped for Firebase
-        const remoteListings=(remote.listings||[]).map(rl=>{
-          const local=prev.listings.find(l=>l.id===rl.id);
-          if(local&&local.screenshots&&local.screenshots.length>0){
-            const mergedSS=local.screenshots.map(s=>{
-              if(s.data&&s.data!=="[local]")return s;
-              const remoteSS=(rl.screenshots||[]).find(rs=>rs.id===s.id);
-              return remoteSS||s;
-            });
-            return{...rl,screenshots:mergedSS};
-          }
-          return rl;
-        });
-        const next={...prev,listings:remoteListings,buildings:remote.buildings||[]};
-        saveLocal(next);
-        return next;
-      });
+    const unsub=auth.onAuthStateChanged(user=>{
+      setAuthUser(user);
+      if(!user){
+        setUserDoc(null);setListings([]);setBuildings([]);setLoading(false);
+      }
     });
-    return ()=>{unsub();setFbConnected(false)};
+    return ()=>unsub();
   },[]);
 
-  const listings=data.listings||[];
-  const buildings=data.buildings||[];
+  // User doc + data subscriptions
+  useEffect(()=>{
+    if(!authUser||!authUser.uid)return;
+    // For email/password users, check verification
+    if(!authUser.emailVerified&&authUser.providerData[0]?.providerId==="password"){
+      setLoading(false);
+      return;
+    }
 
-  const addListing=(listing)=>{
-    setData(prev=>({...prev,listings:[...prev.listings,listing]}));
+    // Ensure user doc exists
+    const userRef=db.collection("users").doc(authUser.uid);
+    userRef.get().then(snap=>{
+      if(!snap.exists){
+        const newUser={
+          email:authUser.email||"",
+          displayName:authUser.displayName||"",
+          createdAt:new Date().toISOString(),
+          plan:"free",
+          workspaceId:"",
+        };
+        userRef.set(newUser);
+      }
+    });
+
+    // Subscribe to user doc
+    if(userDocUnsub.current)userDocUnsub.current();
+    userDocUnsub.current=userRef.onSnapshot(snap=>{
+      if(snap.exists){
+        const ud=snap.data();
+        setUserDoc(ud);
+        // Now subscribe to listings + buildings based on workspace or personal
+        subscribeToData(authUser.uid,ud);
+      }
+      setLoading(false);
+    });
+
+    return ()=>{
+      if(userDocUnsub.current)userDocUnsub.current();
+      if(listingsUnsub.current)listingsUnsub.current();
+      if(buildingsUnsub.current)buildingsUnsub.current();
+    };
+  },[authUser]);
+
+  const subscribeToData=(userId,ud)=>{
+    if(listingsUnsub.current)listingsUnsub.current();
+    if(buildingsUnsub.current)buildingsUnsub.current();
+
+    const lRef=getListingsRef(userId,ud);
+    const bRef=getBuildingsRef(userId,ud);
+
+    listingsUnsub.current=lRef.orderBy("createdAt","desc").onSnapshot(snap=>{
+      setListings(snap.docs.map(d=>({id:d.id,...d.data()})));
+    },err=>{console.error("Listings listen error:",err);setListings([])});
+
+    buildingsUnsub.current=bRef.onSnapshot(snap=>{
+      setBuildings(snap.docs.map(d=>({id:d.id,...d.data()})));
+    },err=>{console.error("Buildings listen error:",err);setBuildings([])});
   };
 
-  const updateListing=(updated)=>{
-    setData(prev=>({...prev,listings:prev.listings.map(l=>l.id===updated.id?updated:l)}));
-    setSelected(updated);
+  const refreshUser=()=>{
+    if(!authUser)return;
+    // Force re-subscribe by re-reading user doc
+    db.collection("users").doc(authUser.uid).get().then(snap=>{
+      if(snap.exists){
+        setUserDoc(snap.data());
+        subscribeToData(authUser.uid,snap.data());
+      }
+    });
   };
 
-  const deleteListing=(id)=>{
-    setData(prev=>({...prev,listings:prev.listings.filter(l=>l.id!==id)}));
+  const username=authUser?.displayName||authUser?.email?.split("@")[0]||"User";
+
+  // ── Data operations ──────────────────────────────────────────────────────
+  const addListing=async(listing)=>{
+    const ref=getListingsRef(authUser.uid,userDoc);
+    await ref.doc(listing.id).set(listing);
+  };
+
+  const updateListing=async(updated)=>{
+    const ref=getListingsRef(authUser.uid,userDoc);
+    await ref.doc(updated.id).set(updated,{merge:true});
+    setSelected(prev=>prev&&prev.id===updated.id?updated:prev);
+  };
+
+  const deleteListing=async(id)=>{
+    const ref=getListingsRef(authUser.uid,userDoc);
+    await ref.doc(id).delete();
+    deleteScreenshotsLocal(id);
     setSelected(null);
   };
 
-  const addBuilding=(building)=>{
-    setData(prev=>({...prev,buildings:[...prev.buildings,building]}));
+  const addBuilding=async(building)=>{
+    const ref=getBuildingsRef(authUser.uid,userDoc);
+    await ref.doc(building.id).set(building);
   };
 
-  const updateBuilding=(updated)=>{
-    setData(prev=>({...prev,buildings:prev.buildings.map(b=>b.id===updated.id?updated:b)}));
-    setSelectedBuilding(updated);
+  const updateBuilding=async(updated)=>{
+    const ref=getBuildingsRef(authUser.uid,userDoc);
+    await ref.doc(updated.id).set(updated,{merge:true});
+    setSelectedBuilding(prev=>prev&&prev.id===updated.id?updated:prev);
   };
 
-  const deleteBuilding=(id)=>{
-    setData(prev=>({...prev,buildings:prev.buildings.filter(b=>b.id!==id),listings:prev.listings.map(l=>l.buildingId===id?{...l,buildingId:""}:l)}));
+  const deleteBuilding=async(id)=>{
+    const ref=getBuildingsRef(authUser.uid,userDoc);
+    await ref.doc(id).delete();
+    // Unlink listings from this building
+    const lRef=getListingsRef(authUser.uid,userDoc);
+    const linked=listings.filter(l=>l.buildingId===id);
+    for(const l of linked){
+      await lRef.doc(l.id).update({buildingId:""});
+    }
     setSelectedBuilding(null);
   };
 
@@ -1235,12 +1546,41 @@ function App(){
     if(!listing||listing.stage===newStageId)return;
     const stageInfo=STAGE_MAP[newStageId];
     const tl=[...(listing.timeline||[]),{event:newStageId,date:today(),note:"Moved to "+stageInfo.label}];
-    const updated={...listing,stage:newStageId,timeline:tl};
-    setData(prev=>({...prev,listings:prev.listings.map(l=>l.id===listingId?updated:l)}));
-    setDragging(null);
+    updateListing({...listing,stage:newStageId,timeline:tl,updatedAt:today()});
   };
 
-  if(!username) return <UsernamePrompt onSet={setUsername} />;
+  const toggleCompare=(id)=>{
+    setCompareIds(prev=>{
+      if(prev.includes(id))return prev.filter(x=>x!==id);
+      if(prev.length>=3)return prev;
+      return[...prev,id];
+    });
+  };
+
+  const dismissGettingStarted=()=>{localStorage.setItem("borough-onboarded","true");setShowGettingStarted(false)};
+
+  // ── Loading ──────────────────────────────────────────────────────────────
+  if(authUser===undefined||loading){
+    return(
+      <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0a0a"}}>
+        <div style={{textAlign:"center"}}>
+          <h1 style={{fontSize:28,fontWeight:700,marginBottom:8,letterSpacing:"-0.5px"}}>Borough</h1>
+          <div style={{fontSize:13,color:"#555",animation:"pulse 1s infinite"}}>Loading...</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Auth gate ────────────────────────────────────────────────────────────
+  if(!authUser) return <AuthScreen />;
+
+  // ── Email verification gate ──────────────────────────────────────────────
+  if(!authUser.emailVerified&&authUser.providerData[0]?.providerId==="password"){
+    return <VerifyEmailScreen user={authUser} />;
+  }
+
+  // ── Main App ─────────────────────────────────────────────────────────────
+  const compareListings=listings.filter(l=>compareIds.includes(l.id));
 
   return(
     <div style={{height:"100vh",display:"flex",flexDirection:"column"}}>
@@ -1248,38 +1588,50 @@ function App(){
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 20px",borderBottom:"1px solid #1a1a1a",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <h1 style={{fontSize:18,fontWeight:700,letterSpacing:"-0.5px"}}>Borough</h1>
-          {fbConnected&&<span style={{fontSize:10,color:"#34d399",fontWeight:500}}>● synced</span>}
+          {userDoc?.workspaceId&&<span style={{fontSize:10,color:"#a78bfa",fontWeight:500,background:"rgba(167,139,250,.1)",padding:"2px 8px",borderRadius:4}}>Workspace</span>}
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {/* Compare button */}
+          {compareIds.length>=2&&(
+            <button onClick={()=>setModal("compare")} style={{padding:"7px 14px",background:"#38bdf8",color:"#000",borderRadius:6,fontSize:12,fontWeight:600}}>
+              Compare ({compareIds.length})
+            </button>
+          )}
+          {compareIds.length>0&&(
+            <button onClick={()=>setCompareIds([])} style={{padding:"7px 14px",background:"#161616",color:"#888",borderRadius:6,fontSize:12,border:"1px solid #222"}}>
+              Clear
+            </button>
+          )}
           <span style={{fontSize:11,color:"#555"}}>{username}</span>
-          <button onClick={()=>setModal("share")} style={{padding:"7px 14px",background:"#161616",color:"#888",borderRadius:6,fontSize:12,border:"1px solid #222"}}>Share</button>
+          <button onClick={()=>setModal("workspace")} style={{padding:"7px 14px",background:"#161616",color:"#888",borderRadius:6,fontSize:12,border:"1px solid #222"}}>
+            {userDoc?.workspaceId?"Workspace":"Share"}
+          </button>
           {view==="pipeline"&&<button onClick={()=>setModal("add")} style={{padding:"7px 14px",background:"#fff",color:"#000",borderRadius:6,fontSize:12,fontWeight:600}}>+ Add Listing</button>}
           {view==="buildings"&&<button onClick={()=>setModal("addBuilding")} style={{padding:"7px 14px",background:"#fff",color:"#000",borderRadius:6,fontSize:12,fontWeight:600}}>+ Add Building</button>}
+          <button onClick={()=>auth.signOut()} style={{padding:"7px 14px",background:"#161616",color:"#ef4444",borderRadius:6,fontSize:12,border:"1px solid #2a1515"}}>Sign Out</button>
         </div>
       </div>
 
       {/* Main Content */}
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
-        {/* Sidebar */}
         <Sidebar view={view} onViewChange={setView} collapsed={sidebarCollapsed} onToggleCollapse={()=>setSidebarCollapsed(!sidebarCollapsed)} />
 
         {/* Pipeline View */}
         {view==="pipeline"&&(
           <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-            {/* Getting Started Banner */}
             {showGettingStarted&&<GettingStartedBanner onDismiss={dismissGettingStarted} />}
-
-            {/* Kanban Board */}
             <div style={{display:"flex",gap:12,padding:"16px 20px",flex:1,overflowX:"auto"}}>
               {STAGES.map(stage=>(
                 <KanbanColumn
                   key={stage.id}
                   stage={stage}
-                  listings={listings.filter(l=>(l.stage||"saved")===stage.id)}
+                  listings={listings.filter(l=>(l.stage||"considering")===stage.id)}
                   onCardClick={(l)=>setSelected(l)}
                   onDrop={handleDrop}
-                  onDragStart={setDragging}
+                  onDragStart={()=>{}}
                   onHeaderClick={()=>setFilteredStage(stage)}
+                  compareIds={compareIds}
+                  onCompareToggle={toggleCompare}
                 />
               ))}
             </div>
@@ -1307,10 +1659,11 @@ function App(){
       {/* Modals */}
       {modal==="add"&&<AddListingModal onClose={()=>setModal(null)} onAdd={addListing} buildings={buildings} />}
       {modal==="addBuilding"&&<AddBuildingModal onClose={()=>setModal(null)} onAdd={addBuilding} />}
-      {modal==="share"&&<ShareModal onClose={()=>setModal(null)} connected={fbConnected} boardId={data.boardId} />}
+      {modal==="workspace"&&<WorkspaceModal onClose={()=>setModal(null)} user={authUser} userDoc={userDoc} onRefreshUser={refreshUser} />}
+      {modal==="compare"&&compareListings.length>=2&&<CompareModal listings={compareListings} onClose={()=>setModal(null)} />}
       {selected&&<DetailModal listing={listings.find(l=>l.id===selected.id)||selected} onClose={()=>setSelected(null)} onUpdate={updateListing} onDelete={deleteListing} username={username} buildings={buildings} />}
       {selectedBuilding&&<BuildingDetailModal building={buildings.find(b=>b.id===selectedBuilding.id)||selectedBuilding} onClose={()=>setSelectedBuilding(null)} onUpdate={updateBuilding} onDelete={deleteBuilding} listings={listings} username={username} />}
-      {filteredStage&&<FilteredStageModal stage={filteredStage} listings={listings.filter(l=>(l.stage||"saved")===filteredStage.id)} onClose={()=>setFilteredStage(null)} onCardClick={(l)=>setSelected(l)} />}
+      {filteredStage&&<FilteredStageModal stage={filteredStage} listings={listings.filter(l=>(l.stage||"considering")===filteredStage.id)} onClose={()=>setFilteredStage(null)} onCardClick={(l)=>setSelected(l)} />}
     </div>
   );
 }
