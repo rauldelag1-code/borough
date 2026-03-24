@@ -973,21 +973,19 @@ function WorkspaceModal({onClose,user,userDoc,onRefreshUser}){
     setCreating(false);
   };
 
+  const[showCopied,setShowCopied]=useState(false);
+  const inviteLink="https://borough-dfc1d.web.app/";
+  const copyLink=()=>{navigator.clipboard.writeText(inviteLink).then(()=>{setShowCopied(true);setTimeout(()=>setShowCopied(false),2000)}).catch(()=>{})};
+
   const sendInvite=async()=>{
     if(!inviteEmail||!inviteEmail.includes("@"))return;
     setInviting(true);setMsg("");
     try{
       const cleanEmail=inviteEmail.toLowerCase().trim();
       await db.collection("workspaces").doc(userDoc.workspaceId).update({pendingEmail:cleanEmail});
-      // Send sign-in link email via Firebase Auth
-      const actionCodeSettings={url:"https://borough-dfc1d.web.app/?invite="+userDoc.workspaceId,handleCodeInApp:true};
-      await auth.sendSignInLinkToEmail(cleanEmail,actionCodeSettings);
-      setMsg("Invite email sent to "+cleanEmail+"! They'll get a link to join Borough.");
       setInviteEmail("");
-    }catch(e){
-      if(e.code==="auth/unauthorized-continue-uri")setMsg("Error: Enable Email Link sign-in in Firebase Console → Authentication → Sign-in method");
-      else setMsg("Error: "+e.message);
-    }
+      setMsg("Invite saved! Share the link below with "+cleanEmail);
+    }catch(e){setMsg("Error: "+e.message)}
     setInviting(false);
   };
 
@@ -1080,8 +1078,18 @@ function WorkspaceModal({onClose,user,userDoc,onRefreshUser}){
           )}
 
           {wsData.pendingEmail&&(
-            <div style={{background:"#1a1a1a",borderRadius:8,padding:12,marginBottom:16,fontSize:12,color:"#888"}}>
-              Pending invite to <strong style={{color:"#fff"}}>{wsData.pendingEmail}</strong>
+            <div style={{background:"#1a1a1a",borderRadius:8,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,color:"#888",marginBottom:10}}>
+                Pending invite to <strong style={{color:"#fff"}}>{wsData.pendingEmail}</strong>
+              </div>
+              <div style={{fontSize:12,color:"#888",marginBottom:8}}>Send them this link to join:</div>
+              <div style={{display:"flex",gap:8}}>
+                <input value={inviteLink} readOnly style={{flex:1,fontSize:12,background:"#0f0f0f",border:"1px solid #333",color:"#38bdf8",cursor:"text"}} onClick={e=>e.target.select()} />
+                <button onClick={copyLink} style={{padding:"8px 14px",background:"#222",color:showCopied?"#34d399":"#fff",borderRadius:6,fontSize:12,whiteSpace:"nowrap",border:"1px solid #333"}}>
+                  {showCopied?"Copied!":"Copy"}
+                </button>
+              </div>
+              <div style={{fontSize:11,color:"#555",marginTop:8}}>They'll sign up and automatically see your shared workspace.</div>
             </div>
           )}
 
@@ -1422,21 +1430,6 @@ function App(){
   const userDocUnsub=useRef(null);
   const listingsUnsub=useRef(null);
   const buildingsUnsub=useRef(null);
-
-  // Handle email link sign-in (when invited user clicks the link in their email)
-  useEffect(()=>{
-    if(auth.isSignInWithEmailLink(window.location.href)){
-      let email=window.localStorage.getItem("borough-invite-email");
-      if(!email){email=window.prompt("Please enter your email to confirm sign-in:")}
-      if(email){
-        auth.signInWithEmailLink(email,window.location.href).then(()=>{
-          window.localStorage.removeItem("borough-invite-email");
-          // Clean the URL
-          window.history.replaceState(null,"",window.location.pathname);
-        }).catch(e=>console.error("Email link sign-in error:",e));
-      }
-    }
-  },[]);
 
   // Auth state listener
   useEffect(()=>{
