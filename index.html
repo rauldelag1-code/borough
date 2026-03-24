@@ -977,10 +977,17 @@ function WorkspaceModal({onClose,user,userDoc,onRefreshUser}){
     if(!inviteEmail||!inviteEmail.includes("@"))return;
     setInviting(true);setMsg("");
     try{
-      await db.collection("workspaces").doc(userDoc.workspaceId).update({pendingEmail:inviteEmail.toLowerCase().trim()});
-      setMsg("Invite sent! Tell "+inviteEmail+" to sign into Borough.");
+      const cleanEmail=inviteEmail.toLowerCase().trim();
+      await db.collection("workspaces").doc(userDoc.workspaceId).update({pendingEmail:cleanEmail});
+      // Send sign-in link email via Firebase Auth
+      const actionCodeSettings={url:"https://borough-dfc1d.web.app/?invite="+userDoc.workspaceId,handleCodeInApp:true};
+      await auth.sendSignInLinkToEmail(cleanEmail,actionCodeSettings);
+      setMsg("Invite email sent to "+cleanEmail+"! They'll get a link to join Borough.");
       setInviteEmail("");
-    }catch(e){setMsg("Error: "+e.message)}
+    }catch(e){
+      if(e.code==="auth/unauthorized-continue-uri")setMsg("Error: Enable Email Link sign-in in Firebase Console → Authentication → Sign-in method");
+      else setMsg("Error: "+e.message);
+    }
     setInviting(false);
   };
 
@@ -1415,6 +1422,21 @@ function App(){
   const userDocUnsub=useRef(null);
   const listingsUnsub=useRef(null);
   const buildingsUnsub=useRef(null);
+
+  // Handle email link sign-in (when invited user clicks the link in their email)
+  useEffect(()=>{
+    if(auth.isSignInWithEmailLink(window.location.href)){
+      let email=window.localStorage.getItem("borough-invite-email");
+      if(!email){email=window.prompt("Please enter your email to confirm sign-in:")}
+      if(email){
+        auth.signInWithEmailLink(email,window.location.href).then(()=>{
+          window.localStorage.removeItem("borough-invite-email");
+          // Clean the URL
+          window.history.replaceState(null,"",window.location.pathname);
+        }).catch(e=>console.error("Email link sign-in error:",e));
+      }
+    }
+  },[]);
 
   // Auth state listener
   useEffect(()=>{
